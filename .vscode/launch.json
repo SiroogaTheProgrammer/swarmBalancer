@@ -1,0 +1,64 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: sim compare",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "swarm.sim.run",
+      "args": ["--compare", "--drones", "5", "--fps", "10", "--duration", "20", "--kill", "2@8"],
+      "cwd": "${workspaceFolder}",
+      "env": { "PYTHONPATH": "${workspaceFolder}/python" },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Python: train tiny cnn",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "swarm.train.train_tiny_cnn",
+      "args": ["--epochs", "1", "--train-size", "1000"],
+      "cwd": "${workspaceFolder}",
+      "env": { "PYTHONPATH": "${workspaceFolder}/python" },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Python: device stress",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "swarm.stress.device_stress",
+      "args": ["--model", "models/tiny_cnn_int8.swm", "--sweep"],
+      "cwd": "${workspaceFolder}",
+      "env": { "PYTHONPATH": "${workspaceFolder}/python" },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Bench: current preset file",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "args": ["--log", "--no-report"],
+      "cwd": "${workspaceFolder}",
+      "env": { "PYTHONPATH": "${workspaceFolder}/python" },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Bench: whole battery",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "swarm.bench",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": { "PYTHONPATH": "${workspaceFolder}/python" },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Python: current file",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "cwd": "${workspaceFolder}",
+      "env": { "PYTHONPATH": "${workspaceFolder}/python" },
+      "console": "integratedTerminal"
+    }
+  ]
+}

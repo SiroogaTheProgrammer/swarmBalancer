@@ -1,0 +1,87 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cmake: configure",
+      "type": "shell",
+      "command": "cmake --preset mingw-arm64",
+      "problemMatcher": [],
+      "group": "build",
+      "detail": "Configure the C++ brain (llvm-mingw preset). On Linux/macOS use `cmake --preset default`."
+    },
+    {
+      "label": "cmake: build",
+      "type": "shell",
+      "command": "cmake --build --preset mingw-arm64",
+      "problemMatcher": ["$gcc"],
+      "group": { "kind": "build", "isDefault": true },
+      "detail": "Build swarm_brain shared library, tools and C++ tests into build/bin."
+    },
+    {
+      "label": "cpp: ctest",
+      "type": "shell",
+      "command": "ctest --preset mingw-arm64",
+      "problemMatcher": [],
+      "group": "test",
+      "dependsOn": "cmake: build"
+    },
+    {
+      "label": "cpp: bench matmul",
+      "type": "shell",
+      "command": "${workspaceFolder}/build/bin/bench_matmul",
+      "problemMatcher": [],
+      "dependsOn": "cmake: build",
+      "detail": "Compare naive vs blocked f32 vs int8 GEMM throughput on this machine."
+    },
+    {
+      "label": "python: pytest",
+      "type": "shell",
+      "command": "python -m pytest",
+      "problemMatcher": [],
+      "group": { "kind": "test", "isDefault": true }
+    },
+    {
+      "label": "python: train tiny cnn",
+      "type": "shell",
+      "command": "python -m swarm.train.train_tiny_cnn --epochs 3",
+      "problemMatcher": [],
+      "detail": "Train the satellite/drone image-recognition net on synthetic data and export models/*.swm (f32 + int8)."
+    },
+    {
+      "label": "sim: compare strategies",
+      "type": "shell",
+      "command": "python -m swarm.sim.run --compare --drones 5 --fps 10 --duration 30 --kill 2@10 --revive 2@20",
+      "problemMatcher": [],
+      "detail": "Run centralized(raw), centralized(preprocessed) and striped strategies with a node failure + recovery."
+    },
+    {
+      "label": "stress: device sweep",
+      "type": "shell",
+      "command": "python -m swarm.stress.device_stress --model models/tiny_cnn_int8.swm --sweep",
+      "problemMatcher": [],
+      "detail": "Check the trained brain against every device profile (RAM fit, est. time/frame, deadline misses)."
+    },
+    {
+      "label": "bench: run standardized battery",
+      "type": "shell",
+      "command": "python -m swarm.bench",
+      "problemMatcher": [],
+      "group": "test",
+      "detail": "Run every scenarios/*.py preset against the independent-thinkers baseline; scoreboard + reports in out/bench/."
+    },
+    {
+      "label": "bench: run current preset file",
+      "type": "shell",
+      "command": "python ${file} --log",
+      "problemMatcher": [],
+      "detail": "Run the scenario preset open in the editor (scenarios/*.py) and print the fault event log."
+    },
+    {
+      "label": "bench: smoke (fast, oracle brain)",
+      "type": "shell",
+      "command": "python -m swarm.bench --fast --brain oracle --no-stress --no-report",
+      "problemMatcher": [],
+      "detail": "Quick pass over the battery without the trained model or stress section."
+    }
+  ]
+}

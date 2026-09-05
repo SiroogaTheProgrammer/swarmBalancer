@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+dist/
+
+# C++ / CMake
+build/
+build-*/
+CMakeUserPresets.json
+compile_commands.json
+
+# Trained artifacts (regenerate with `python -m swarm.train.train_tiny_cnn`)
+models/*.swm
+models/*.npz
+
+# Sim / stress outputs
+out/
+
+# Editors / OS
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
