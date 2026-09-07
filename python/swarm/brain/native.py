@@ -2,8 +2,11 @@
 
 Everything degrades gracefully: if the library has not been built,
 :func:`available` returns ``False`` and callers fall back to the numpy
-engine. Build it with ``cmake --preset mingw-arm64 && cmake --build --preset mingw-arm64``
-(or ``default`` on Linux/macOS); the loader looks in ``build*/bin``.
+engine. Build it with ``python dev.py build`` (which also builds a DLL of the
+right architecture when python.exe is, say, an x64 build running emulated on
+an ARM64 PC - ctypes can only load a DLL of the interpreter's own
+architecture). The loader looks in every ``build*/bin``; :func:`diagnosis`
+explains what it found.
 """
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
+
+from swarm import _arch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 _LIB_NAMES = {"win32": "swarm_brain.dll", "darwin": "libswarm_brain.dylib"}
@@ -32,16 +37,21 @@ def candidate_paths() -> list[Path]:
     return paths
 
 
+def _ranked_candidates() -> list[tuple[Path, str | None]]:
+    """Existing candidate files with their architecture, the ones matching this interpreter first."""
+    want = _arch.python_arch()
+    found = [(p, _arch.dll_arch(p) if sys.platform == "win32" else None) for p in candidate_paths() if p.is_file()]
+    return sorted(found, key=lambda pa: 0 if (pa[1] is None or pa[1] == want) else 1)
+
+
 @lru_cache(maxsize=1)
 def _load() -> C.CDLL | None:
-    for p in candidate_paths():
-        if not p.is_file():
-            continue
+    for p, arch in _ranked_candidates():
+        if sys.platform == "win32" and arch and arch != _arch.python_arch():
+            continue  # LoadLibrary would fail with WinError 193; do not even try
         try:
             lib = C.CDLL(str(p))
         except OSError:
-            # Typically an architecture mismatch (e.g. ARM64 DLL vs. an x64 python.exe
-            # running emulated): keep looking, another build dir may have the right one.
             continue
         _declare(lib)
         return lib
@@ -80,14 +90,39 @@ def build_info() -> str:
     return lib.swm_build_info().decode() if lib else "native engine not built"
 
 
+def loaded_path() -> Path | None:
+    lib = _load()
+    return Path(lib._name) if lib else None
+
+
+def diagnosis() -> str:
+    """One paragraph on why the engine is / is not available, with the command that fixes it."""
+    lib = _load()
+    py = _arch.describe_python()
+    if lib:
+        return f"native engine OK: {Path(lib._name).relative_to(REPO_ROOT).as_posix()} ({build_info()}) for python {py}"
+    found = _ranked_candidates()
+    if not found:
+        return f"native engine not built (no {LIB_NAME} in build*/bin). Run: python dev.py build"
+    lines = [f"native engine not loadable by this python ({py}):"]
+    want = _arch.python_arch()
+    for p, arch in found:
+        rel = p.relative_to(REPO_ROOT).as_posix()
+        if arch and want and arch != want:
+            lines.append(f"  - {rel} is {arch}, python is {want} -> cannot be loaded (ctypes needs the same architecture)")
+        else:
+            lines.append(f"  - {rel} ({arch or 'unknown arch'}) failed to load")
+    lines.append(f"Fix: python dev.py build   (builds a {want} DLL into build-{want}/ for this interpreter)")
+    if _arch.python_is_emulated():
+        lines.append(f"Tip: a native {_arch.machine_arch()} Python (python.org installer) would run numpy natively and "
+                     "need only the one build.")
+    return "\n".join(lines)
+
+
 def _require() -> C.CDLL:
     lib = _load()
     if lib is None:
-        raise RuntimeError(
-            f"native engine not found or not loadable (looked for {LIB_NAME} in {[str(p) for p in candidate_paths()]}). "
-            "Build it with: cmake --preset mingw-arm64 && cmake --build --preset mingw-arm64 "
-            "(if python.exe is an x64 build on an ARM64 PC, also: cmake --preset mingw-x64 && cmake --build --preset mingw-x64)"
-        )
+        raise RuntimeError(diagnosis())
     return lib
 
 

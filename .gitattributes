@@ -1,2 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Binary artifacts: never normalise line endings
+*.swm binary
+*.npz binary
+*.dll binary
+*.exe binary
+*.a binary

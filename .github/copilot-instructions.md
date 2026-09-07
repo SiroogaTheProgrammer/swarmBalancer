@@ -7,8 +7,9 @@ Workbench for AI swarms (satellites, drones, ...) that redistribute compute. Two
 
 ## Build / test
 
-- C++: `cmake --preset mingw-arm64 && cmake --build --preset mingw-arm64 && ctest --preset mingw-arm64` (this machine is Windows ARM64 with llvm-mingw; use `default` elsewhere). Python on this machine is an x64 build under emulation, so also `cmake --preset mingw-x64 && cmake --build --preset mingw-x64` to get a loadable DLL.
-- Python: `python -m pytest` (uses `pythonpath = ["python"]` from `pyproject.toml`). Native tests skip if the engine is not built.
+- Everything through `python dev.py {doctor,build,test,train,bench,all}` - it finds cmake/ninja/llvm-mingw on PATH *or* in `%LOCALAPPDATA%\Microsoft\WinGet\Packages` (shells here often lack them), builds `build/` for the real CPU (ARM64) and `build-x64/` for the Store Python, which is an x64 build running emulated. `python -c "from swarm.brain import native; print(native.diagnosis())"` explains DLL/interpreter architecture problems.
+- Plain CMake: `cmake --preset default|mingw-arm64|mingw-x64|python-dll` then `cmake --build --preset <p>`; `cmake/toolchain-auto.cmake` (included before `project()`) chooses the compiler from `SWARM_TARGET_ARCH` and refuses to switch architecture inside an existing build dir. Never hardcode compiler names in presets - they must work without PATH.
+- Python: `python -m pytest` (uses `pythonpath = ["python"]` from `pyproject.toml`). Native tests skip if the engine is not built. `swarm/_arch.py` must stay stdlib-only (dev.py imports it before numpy exists).
 - Train: `python -m swarm.train.train_tiny_cnn`. Sim: `python -m swarm.sim.run --compare`. Stress: `python -m swarm.stress.device_stress --model models/tiny_cnn_int8.swm --sweep`.
 - Standardized battery: `python -m swarm.bench` (every `scenarios/*.py`; exit 1 if a check fails; reports in `out/bench/`). One preset: `python scenarios/s02_leader_loss.py --log`. `SWARM_FULL_BENCH=1 python -m pytest tests/test_bench.py` runs the battery under pytest.
 

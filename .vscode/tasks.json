@@ -1,44 +1,51 @@
 {
   "version": "2.0.0",
+  "options": {
+    "cwd": "${workspaceFolder}",
+    "env": { "PYTHONPATH": "${workspaceFolder}/python" }
+  },
   "tasks": [
     {
-      "label": "cmake: configure",
+      "label": "dev: doctor",
       "type": "shell",
-      "command": "cmake --preset mingw-arm64",
+      "command": "python dev.py doctor",
       "problemMatcher": [],
-      "group": "build",
-      "detail": "Configure the C++ brain (llvm-mingw preset). On Linux/macOS use `cmake --preset default`."
+      "detail": "What this machine has / lacks (cmake, ninja, llvm-mingw, python arch, engine DLL) and how to fix it."
     },
     {
-      "label": "cmake: build",
+      "label": "dev: build C++ engine",
       "type": "shell",
-      "command": "cmake --build --preset mingw-arm64",
+      "command": "python dev.py build",
       "problemMatcher": ["$gcc"],
       "group": { "kind": "build", "isDefault": true },
-      "detail": "Build swarm_brain shared library, tools and C++ tests into build/bin."
+      "detail": "Finds the toolchain itself (PATH or winget dir), builds tools+tests for the real CPU and a DLL for this python.exe."
     },
     {
-      "label": "cpp: ctest",
+      "label": "dev: test (ctest + pytest)",
       "type": "shell",
-      "command": "ctest --preset mingw-arm64",
+      "command": "python dev.py test",
       "problemMatcher": [],
-      "group": "test",
-      "dependsOn": "cmake: build"
+      "group": { "kind": "test", "isDefault": true }
+    },
+    {
+      "label": "dev: all (doctor, build, test, train, bench)",
+      "type": "shell",
+      "command": "python dev.py all",
+      "problemMatcher": []
     },
     {
       "label": "cpp: bench matmul",
       "type": "shell",
       "command": "${workspaceFolder}/build/bin/bench_matmul",
       "problemMatcher": [],
-      "dependsOn": "cmake: build",
+      "dependsOn": "dev: build C++ engine",
       "detail": "Compare naive vs blocked f32 vs int8 GEMM throughput on this machine."
     },
     {
       "label": "python: pytest",
       "type": "shell",
       "command": "python -m pytest",
-      "problemMatcher": [],
-      "group": { "kind": "test", "isDefault": true }
+      "problemMatcher": []
     },
     {
       "label": "python: train tiny cnn",

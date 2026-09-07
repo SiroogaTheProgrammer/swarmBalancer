@@ -1,10 +1,10 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
   "configurePresets": [
     {
       "name": "default",
-      "displayName": "Ninja Release (system default compiler)",
+      "displayName": "Ninja Release - auto toolchain (llvm-mingw for the real CPU on Windows, system compiler elsewhere)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
@@ -13,23 +13,35 @@
     },
     {
       "name": "mingw-arm64",
-      "displayName": "Ninja Release (llvm-mingw, Windows ARM64, no Visual Studio needed)",
+      "displayName": "Ninja Release - llvm-mingw, ARM64 Windows (tools, tests, native DLL)",
       "inherits": "default",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
       "cacheVariables": {
-        "CMAKE_C_COMPILER": "aarch64-w64-mingw32-clang",
-        "CMAKE_CXX_COMPILER": "aarch64-w64-mingw32-clang++"
+        "SWARM_TARGET_ARCH": "arm64"
       }
     },
     {
       "name": "mingw-x64",
-      "displayName": "Ninja Release (llvm-mingw cross-build for x86_64 Windows)",
-      "description": "Only needed when the Python interpreter is an x64 build (e.g. the Store Python running emulated on an ARM64 PC): ctypes can only load a DLL of the same architecture as python.exe. Output goes to build-x64/, the loader picks whichever DLL loads.",
+      "displayName": "Ninja Release - llvm-mingw, x64 Windows DLL for an x64 Python (cross-build on ARM64)",
+      "description": "Only needed when python.exe is an x64 build (e.g. the Store Python running emulated on an ARM64 PC): ctypes can only load a DLL of the interpreter's own architecture. Output goes to build-x64/. `python dev.py build` runs this automatically when required.",
       "inherits": "default",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
       "binaryDir": "${sourceDir}/build-x64",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": "x86_64-w64-mingw32-clang",
-        "CMAKE_CXX_COMPILER": "x86_64-w64-mingw32-clang++",
+        "SWARM_TARGET_ARCH": "x64",
         "SWARM_NATIVE_ARCH": "OFF",
+        "SWARM_BUILD_TESTS": "OFF",
+        "SWARM_BUILD_TOOLS": "OFF"
+      }
+    },
+    {
+      "name": "python-dll",
+      "displayName": "Ninja Release - DLL for whatever architecture `python` on PATH is",
+      "inherits": "default",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "binaryDir": "${sourceDir}/build-python",
+      "cacheVariables": {
+        "SWARM_TARGET_ARCH": "python",
         "SWARM_BUILD_TESTS": "OFF",
         "SWARM_BUILD_TOOLS": "OFF"
       }
@@ -49,6 +61,7 @@
     { "name": "default", "configurePreset": "default" },
     { "name": "mingw-arm64", "configurePreset": "mingw-arm64" },
     { "name": "mingw-x64", "configurePreset": "mingw-x64" },
+    { "name": "python-dll", "configurePreset": "python-dll" },
     { "name": "target-generic", "configurePreset": "target-generic" }
   ],
   "testPresets": [

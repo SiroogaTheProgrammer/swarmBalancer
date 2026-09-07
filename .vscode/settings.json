@@ -3,8 +3,11 @@
   "python.testing.pytestEnabled": true,
   "python.testing.unittestEnabled": false,
   "python.testing.pytestArgs": ["tests"],
+  // CMake Tools: always go through CMakePresets.json. Kit scanning would pick the MSVC-targeting
+  // clang in C:\Program Files\LLVM, which cannot link without the Windows SDK (kernel32.lib errors).
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": false,
   "cmake.sourceDirectory": "${workspaceFolder}",
-  "cmake.buildDirectory": "${workspaceFolder}/build",
   "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
   "C_Cpp.default.cppStandard": "c++17",
   "files.associations": {

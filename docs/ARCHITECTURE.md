@@ -7,6 +7,14 @@
 3. Watch the swarm **rebalance** when a member disappears or returns.
 4. Do all of it on the development PC, deterministically, with the *same* C++ code that would ship on the device.
 
+## Building on Windows-on-ARM (`dev.py`, `cmake/toolchain-auto.cmake`, `swarm/_arch.py`)
+
+Three facts make an ARM64 Windows PC hostile to "just run cmake": the MSVC-targeting clang from LLVM.org cannot link without the Windows SDK; winget-installed tools are not on every shell's PATH; the Store Python is an x64 build running emulated, so `PROCESSOR_ARCHITECTURE` lies and ctypes needs an x64 DLL. The fix is in three places:
+
+* `cmake/toolchain-auto.cmake` is included **before `project()`** (the point at which CMake locks in a compiler). It reads the real architecture from the registry, resolves `SWARM_TARGET_ARCH` (`native|arm64|x64|x86|python`), finds `<triple>-clang++` on PATH or under `%LOCALAPPDATA%\Microsoft\WinGet\Packages`, finds ninja the same way, and records `SWARM_RESOLVED_ARCH` in the cache so a later configure cannot silently switch architecture inside the same build directory. It stands aside if the user set `CMAKE_CXX_COMPILER`, `CC/CXX` or a toolchain file.
+* `swarm/_arch.py` (stdlib only) answers *machine*, *python* and *DLL* architecture from authoritative sources (registry, `sysconfig.get_platform()`, the PE header) in one vocabulary. `native.py` uses it to try only DLLs that can load and to explain mismatches (`native.diagnosis()`).
+* `dev.py` builds `build/` for the real CPU (tools, tests, native DLL) and `build-<pyarch>/` when the interpreter differs, replaces build directories whose cache came from another toolchain, and runs ctest/pytest/train/bench - all with tools located the same way, so it works from a shell that has nothing on PATH.
+
 ## Brain kernels (`cpp/src/matmul.cpp`)
 
 Everything reduces to `C[M,N] = A[M,K] * B[K,N]`:

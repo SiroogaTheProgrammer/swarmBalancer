@@ -14,39 +14,66 @@ Everything here is designed to be **built and stress-tested on this PC first**: 
 
 ## Quick start
 
+Prerequisites (all user-scope winget packages, no admin rights and no Visual Studio needed; on Linux/macOS any C++17 compiler + cmake + ninja):
+
 ```powershell
-# 1. C++ engine (Windows ARM64 with llvm-mingw; use --preset default on Linux/macOS or with another compiler)
-cmake --preset mingw-arm64
-cmake --build --preset mingw-arm64
-ctest --preset mingw-arm64
+winget install --id Kitware.CMake --scope user --silent --accept-package-agreements --accept-source-agreements
+winget install --id Ninja-build.Ninja --scope user --silent --accept-package-agreements --accept-source-agreements
+winget install --id MartinStorsjo.LLVM-MinGW.UCRT --scope user --silent --accept-package-agreements --accept-source-agreements
+```
+
+Then everything goes through one script. It finds the tools itself (on PATH **or** in the winget package directory - shells on Windows-on-ARM often do not see them), reads the real CPU architecture, and builds a DLL that matches *your* python.exe:
+
+```powershell
+python dev.py doctor     # what this machine has / lacks, and the exact command to fix each item
+python dev.py build      # C++ engine: tools + tests for the real CPU, plus a DLL for this python if it differs
+python dev.py test       # ctest + pytest (installs numpy/pytest into the current interpreter if missing)
+python dev.py train      # the satellite/drone image-recognition brain -> models/tiny_cnn_{f32,int8}.swm  (~20 s)
+python dev.py bench      # the standardized scenario battery, reports in out/bench/
+python dev.py all        # all of the above in order
+```
+
+<details><summary>Why a script, and what it does on Windows-on-ARM</summary>
+
+Three things go wrong on an ARM64 Windows PC when CMake is left to its own devices, and they all look like "cmake is broken":
+
+1. CMake picks `C:\Program Files\LLVM\clang++` (the MSVC-targeting build) and fails to link with *could not open kernel32.lib* - it needs the Windows SDK / Visual Studio. [cmake/toolchain-auto.cmake](cmake/toolchain-auto.cmake) instead selects llvm-mingw (`aarch64-w64-mingw32-clang++`), which is self-contained.
+2. Tools installed by winget are not on the PATH of every shell (and often not of VS Code). The toolchain file and `dev.py` look in `%LOCALAPPDATA%\Microsoft\WinGet\Packages` as well.
+3. The Microsoft Store Python is an **x64** build running under emulation (`sysconfig.get_platform()` says `win-amd64` even though the CPU is ARM64). ctypes can only load a DLL of the interpreter's own architecture, so `dev.py build` cross-compiles a second, x64 `swarm_brain.dll` into `build-x64/`; `python -c "from swarm.brain import native; print(native.diagnosis())"` tells you which DLL is in use and why. A native ARM64 Python (python.org installer) avoids the second build and runs numpy natively.
+
+Plain CMake still works if you prefer it: `cmake --preset default` (auto toolchain for the real CPU), `--preset mingw-arm64`, `--preset mingw-x64`, `--preset python-dll` (DLL for whatever `python` on PATH is), then `cmake --build --preset <name>` and `ctest --preset mingw-arm64`. `-DSWARM_TARGET_ARCH=native|arm64|x64|x86|python` chooses the CPU for a bare `cmake -S . -B build -G Ninja`.
+</details>
+
+Manual equivalents of the steps above:
+
+```powershell
+# C++ engine by hand
+cmake --preset default; cmake --build --preset default; ctest --preset default
 .\build\bin\bench_matmul.exe          # kernel throughput on this machine
 
-# If your python.exe is an x64 build running emulated on an ARM64 PC (Store Python), ctypes needs an x64 DLL too:
-cmake --preset mingw-x64; cmake --build --preset mingw-x64
-
-# 2. Python
+# Python
 python -m pip install -e .[dev]       # or just: set PYTHONPATH=python and pip install numpy pytest
 python -m pytest
 
-# 3. Train the satellite/drone image-recognition brain (synthetic overhead imagery, ~20 s)
+# Train the satellite/drone image-recognition brain (synthetic overhead imagery, ~20 s)
 python -m swarm.train.train_tiny_cnn --epochs 3
 #    -> models/tiny_cnn_f32.swm, models/tiny_cnn_int8.swm (+ cross-check against the C++ engine)
 
-# 4. Stress it "as if on a small device"
+# Stress it "as if on a small device"
 python -m swarm.stress.device_stress --model models/tiny_cnn_int8.swm --sweep
 .\build\bin\run_model.exe models\tiny_cnn_int8.swm --ram-cap 196608 --repeat 1000
 
-# 5. Simulate the swarm: compare strategies, kill the leader at t=10 s
+# Simulate the swarm: compare strategies, kill the leader at t=10 s
 python -m swarm.sim.run --compare --drones 5 --fps 10 --duration 30 --kill leader@10
 python -m swarm.sim.run --strategy striped --kill 2@8 --revive 2@14 -v        # event log
 python -m swarm.sim.run --compare --brain native --model models/tiny_cnn_int8.swm  # real brain in the C++ engine
 
-# 6. Standardized tests: run a scenario preset, or the whole battery (reports in out/bench/)
+# Standardized tests: run a scenario preset, or the whole battery (reports in out/bench/)
 python scenarios/s02_leader_loss.py --log
 python -m swarm.bench
 ```
 
-VS Code: `Terminal > Run Task` has entries for all of the above; `Run and Debug` has launch configs for the Python entry points and for the preset file open in the editor.
+VS Code: `Terminal > Run Task` has `dev: build C++ engine` (default build task), `dev: test`, `dev: all`, plus the trainer, simulator, stress and bench entries; `Run and Debug` has launch configs for the Python entry points and for the preset file open in the editor. The CMake Tools extension is configured to use the presets (kit scanning would pick the wrong clang).
 
 ## Scenario presets and the standardized battery
 
@@ -109,8 +136,11 @@ Every node broadcasts an 8-byte heartbeat every `--hb-interval` seconds; a peer 
 ## Layout
 
 ```
+dev.py               one entry point: doctor | build | test | train | bench | all (finds the toolchain itself)
+cmake/               toolchain-auto.cmake: picks llvm-mingw + ninja + target CPU on Windows before project()
 cpp/                 C++ brain: include/swarm/*.hpp, src/*.cpp, tools/ (bench_matmul, run_model), tests/
 python/swarm/
+  _arch.py           real machine / python / DLL architecture (stdlib only)
   brain/             numpy layers (fwd+bwd), Sequential, .swm format, ctypes bridge to the C++ engine
   train/             synthetic overhead-imagery dataset, tiny CNN trainer
   devices/           device profiles (MHz, MACs/cycle, RAM, radio)

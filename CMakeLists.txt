@@ -1,4 +1,9 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)
+
+# On Windows: find llvm-mingw + ninja (PATH or winget dir) and pick the CPU to build for.
+# Must run before project(), which is where CMake locks in the compiler.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/toolchain-auto.cmake)
+
 project(swarmBalancer LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
