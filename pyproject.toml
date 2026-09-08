@@ -10,7 +10,13 @@ requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "cryptography>=44"]
+deploy = ["cryptography>=44"]
+
+[project.scripts]
+swarm-worker = "swarm.runtime.cli:main"
+swarm-deploy = "swarm.deploy.cli:main"
+swarm-setup = "swarm.deploy.setup:main"
 
 [tool.setuptools.packages.find]
 where = ["python"]

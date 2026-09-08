@@ -6,6 +6,20 @@
   },
   "tasks": [
     {
+      "label": "device: setup and USB export",
+      "type": "shell",
+      "command": "python setup_device.py",
+      "problemMatcher": [],
+      "detail": "Select a brain and prepare/sign/encrypt an application for mounted USB. No flashing or hardware commands."
+    },
+    {
+      "label": "device: encrypted runtime demo",
+      "type": "shell",
+      "command": "python dev.py runtime-demo",
+      "problemMatcher": [],
+      "detail": "Real loopback TLS 1.3 with temporary node identities, remote inference and worker failover; no robot access."
+    },
+    {
       "label": "dev: doctor",
       "type": "shell",
       "command": "python dev.py doctor",

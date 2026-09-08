@@ -1,8 +1,36 @@
 # swarmBalancer
 
-A workbench for designing **AI swarms that share their brains**: satellites, drones (and later buggies, small aircraft, ...) that redistribute the work of processing large / high-quality sensor data across the swarm instead of each member being an independent thinker.
+A **testing toolkit and device-side swarm framework** for sharing inference workloads between satellites, drones, rovers and other robots.
 
-Everything here is designed to be **built and stress-tested on this PC first**: the brain runs in a C++ engine with a hard RAM cap that emulates a small device, the swarm runs in a deterministic simulator with a shared radio channel, and members can be killed / revived to watch the swarm rebalance itself.
+The existing training, simulator, C++ kernels, stress harness and standardized scenarios remain the **testing toolkit**. Their paths and commands are unchanged. The new device runtime is separate: authenticated communication, bounded load balancing and an interface for locally selected brain code. Vendor drivers, pin layouts, autopilots and mission-specific control policy belong in external, reviewed applications—not in the network protocol.
+
+| Part | Start here |
+| --- | --- |
+| **Testing toolkit** | Existing [dev.py](dev.py), scenarios and benchmark commands below |
+| **Device runtime** | [docs/RUNTIME.md](docs/RUNTIME.md): TLS 1.3 mutual authentication, pinned peers, bounded inference and worker failover |
+| **Select a brain / export to USB** | [setup_device.py](setup_device.py): desktop picker or CLI; [operator workflow](docs/DEPLOYMENT.md) |
+| **Robot attachments and motors** | [docs/ROBOT_ADAPTERS.md](docs/ROBOT_ADAPTERS.md): local plugins, channel mapping, limits, dry run and explicit arming |
+| **Security and limitations** | [docs/SECURITY.md](docs/SECURITY.md): key separation, trust bootstrap, signed encrypted updates, residual risks |
+
+## Device setup quick start
+
+```powershell
+python -m pip install -e ".[dev,deploy]"
+python setup_device.py                    # desktop brain/config selector and encrypted USB export
+python setup_device.py prepare --help     # equivalent headless payload builder
+python dev.py deploy --help               # enrollment, signing, export, verification and installation
+python dev.py runtime-demo                # real loopback TLS and lost-worker recovery; NO robot hardware
+```
+
+The setup program prepares only the runtime, robot-interface SDK and explicitly selected brain/config/model. It does **not** copy the training/simulation toolkit onto a robot. Choose a Python brain package via its local factory, or select an exported model plus a **Linux/Pi-built** C++ library. A Windows ARM64 DLL is not a Pi binary.
+
+Provision each Pi's identity locally and authenticate public keys out of band first. Then **prepare → sign/encrypt for that device → copy to mounted USB → verify/install on the booted Pi → launch explicitly**. The installer checks identity, target, signature, file hashes and increasing release version. No disk flashing, formatting, automatic SSH, automatic launch, or network motor commands are involved. A Pi's USB power socket is not a universal firmware-upload interface.
+
+The live runtime needs only Python's standard library/TLS; cryptography is an optional dependency for provisioning and bundle operations. The overall development distribution still includes numpy for the toolkit. No claim is made of an unbreakable, independently audited or flight-certified system. Physical Pi/USB/RF and motor commissioning remain to be tested on the intended hardware.
+
+## Testing toolkit
+
+The brain runs in a C++ engine with a capped inference arena, while the existing swarm simulator uses deterministic device/radio costs and injectable failures. Simulated timings and radio assumptions are **not** the real TLS runtime's measurements.
 
 | Layer | Language | What |
 |---|---|---|
@@ -12,7 +40,7 @@ Everything here is designed to be **built and stress-tested on this PC first**: 
 | **Swarm simulator** | Python | Discrete-event: devices (MACs -> seconds), shared channel (bps/latency/loss), heartbeats, failure detection, deterministic leader election, three workload strategies. |
 | **Stress harness** | Python + C++ | Checks a brain against device profiles (Cortex-M4 drone MCU ... CubeSat OBC): RAM fit under a hard cap, cycle budget, deadline misses, int8 vs f32 agreement. |
 
-## Quick start
+### Toolkit quick start
 
 Prerequisites (all user-scope winget packages, no admin rights and no Visual Studio needed; on Linux/macOS any C++17 compiler + cmake + ninja):
 
@@ -131,12 +159,15 @@ Raw streaming eats 74% of the link (and 266% with a 1 Mbps radio, dropping half 
 
 ## Fault tolerance
 
-Every node broadcasts an 8-byte heartbeat every `--hb-interval` seconds; a peer silent for `--missed-beats` intervals is *suspected*, the node's rotation / leader is recomputed, and `rebalances` is incremented. The leader is the live node with the highest priority (compute power, ties -> lowest id) - the same rule on every node's own view, so no election messages are needed and all nodes converge within one timeout. Frames sent to a dead node before detection are the price (visible as `drop`); tune `--hb-interval` / `--missed-beats` to trade detection speed against false suspicions.
+In the **simulator**, every node broadcasts an 8-byte heartbeat every `--hb-interval` seconds; a peer silent for `--missed-beats` intervals is *suspected*, the node's rotation / leader is recomputed, and `rebalances` is incremented. The leader is the live node with the highest priority (compute power, ties -> lowest id). Frames sent to a dead node before detection appear as drops. Tune `--hb-interval` / `--missed-beats` to trade detection speed against false suspicions.
+
+The **device runtime** uses actual TLS connections, load announcements, bounded queues and input-owner retries/local fallback. Its preferred leader is only advisory, not distributed consensus or permission to control hardware. TCP/TLS and radio overhead are real costs; see [runtime failure and bandwidth semantics](docs/RUNTIME.md).
 
 ## Layout
 
 ```
 dev.py               one entry point: doctor | build | test | train | bench | all (finds the toolchain itself)
+setup_device.py      separate device setup GUI/CLI: select a brain, assemble, sign/encrypt, export to USB
 cmake/               toolchain-auto.cmake: picks llvm-mingw + ninja + target CPU on Windows before project()
 cpp/                 C++ brain: include/swarm/*.hpp, src/*.cpp, tools/ (bench_matmul, run_model), tests/
 python/swarm/
@@ -147,6 +178,11 @@ python/swarm/
   sim/               simulator core, channel, membership, brains, strategies, CLI
   stress/            device stress harness
   bench/             scenario presets: dataclasses, runner (twin run, survivability, checks), reports, battery CLI
+  runtime/           stdlib device-side TLS mesh, bounded scheduler, local brain factories
+  deploy/            optional crypto: identity enrollment, signed encrypted bundles, atomic USB install/launch
+  robotics/          stdlib local hardware-adapter SDK, dry run, explicit arming and watchdog guard
+deploy/raspberry_pi/  node config and hardware-disabled application/service examples
+examples/robots/     dry-run motor/attachment profiles and external-driver integration examples
 scenarios/           the standardized battery (s01..s12) + _template.py; each file is runnable
 tests/               pytest suite (C++ engine tests are skipped if it is not built)
 models/              trained .swm files (git-ignored; regenerate with the trainer)

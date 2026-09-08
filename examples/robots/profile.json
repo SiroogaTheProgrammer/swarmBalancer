@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "adapter": "examples.robots.differential_drive:make_adapter",
+  "adapter_config": {
+    "driver_factory": "examples.robots.differential_drive:make_fake_driver",
+    "driver_config": {}
+  },
+  "dry_run": true,
+  "watchdog_s": 0.5,
+  "required_capabilities": ["motors", "observe"],
+  "motors": [
+    {"id": "left", "channel": "left-wheel", "inverted": false, "min": -0.5, "max": 0.5},
+    {"id": "right", "channel": "right-wheel", "inverted": true, "min": -0.5, "max": 0.5}
+  ],
+  "attachments": [
+    {"id": "front-camera", "type": "camera", "connection": {"interface": "virtual", "endpoint": "demo-camera-frame"}},
+    {"id": "bumper", "type": "contact_sensor", "connection": {"interface": "virtual", "endpoint": "demo-bumper"}}
+  ]
+}

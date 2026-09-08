@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "node": {
+    "node_id": "pi-01",
+    "workload_id": "digest-smoke-v1",
+    "host": "0.0.0.0",
+    "port": 7443,
+    "tls": {
+      "ca": "${SWARM_IDENTITY_DIR}/credentials/ca.pem",
+      "certificate": "${SWARM_IDENTITY_DIR}/credentials/tls-cert.pem",
+      "private_key": "${SWARM_IDENTITY_DIR}/tls-key.pem"
+    },
+    "peers": [],
+    "queue_limit": 4,
+    "max_submissions": 32,
+    "max_payload": 65536,
+    "heartbeat_s": 1.0,
+    "peer_timeout_s": 5.0,
+    "job_timeout_s": 2.0,
+    "retries": 2,
+    "estimated_ms": 10.0
+  },
+  "brain": {
+    "factory": "swarm.runtime.handlers:make_digest_handler",
+    "options": {}
+  }
+}

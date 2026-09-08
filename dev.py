@@ -233,6 +233,15 @@ def bench(args: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Preserve all toolkit commands. Device tools are explicit, separate opt-ins,
+    # passed through without loading a model, installing a driver or opening hardware.
+    argv = list(sys.argv[1:] if argv is None else argv)
+    device_tools = {"runtime": "swarm.runtime", "runtime-demo": "swarm.runtime.demo",
+                    "deploy": "swarm.deploy", "setup": "swarm.deploy.setup"}
+    if argv and argv[0] in device_tools:
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(ROOT / "python") + os.pathsep + env.get("PYTHONPATH", "")
+        return run([sys.executable, "-m", device_tools[argv[0]], *argv[1:]], env=env, check=False)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("doctor")
@@ -248,6 +257,8 @@ def main(argv: list[str] | None = None) -> int:
     be.add_argument("rest", nargs=argparse.REMAINDER)
     a = sub.add_parser("all")
     a.add_argument("--clean", action="store_true")
+    for command, module in device_tools.items():
+        sub.add_parser(command, help=f"device tool: python -m {module} (separate from the testing toolkit)")
     args = ap.parse_args(argv)
 
     os.chdir(ROOT)

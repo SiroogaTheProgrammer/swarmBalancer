@@ -20,6 +20,18 @@ models/*.npz
 # Sim / stress outputs
 out/
 
+# Local provisioning material / encrypted deployment artifacts (never commit keys)
+.swarm-local/
+authority/
+identity/
+credentials/
+prepared-device/
+*.swarmbundle
+*.pem
+*.key
+*.p12
+*.pfx
+
 # Editors / OS
 .idea/
 *.swp
