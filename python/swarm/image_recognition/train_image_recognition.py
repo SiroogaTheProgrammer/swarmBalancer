@@ -14,12 +14,44 @@ import zlib
 
 import numpy as np
 
+from swarm.brain import Conv2D, Dense, Flatten, MaxPool2D, ReLU
 from swarm.brain import formats
 from swarm.brain.model import Sequential
-from swarm.train.dataset import make_dataset
-from swarm.train.train_tiny_cnn import accuracy, build_tiny_cnn, train
+from swarm.train.dataset import NUM_CLASSES, make_dataset
+from swarm.train.train_tiny_cnn import accuracy, train
 
 MODELS_DIR = Path(__file__).resolve().parents[3] / "models" / "image_recognition"
+
+
+def build_camera_cnn(size: int = 64, width: int = 24, seed: int = 0) -> Sequential:
+    """A larger CNN suitable for live camera input and quick object recognition.
+
+    This is not a full detector network like YOLO, but it is a realistic upgrade from
+    the tiny 32x32 prototype: broader feature maps, deeper intermediate stages, and
+    enough capacity to run on camera frames for edge inference.
+    """
+    rng = np.random.default_rng(seed)
+    c1, c2, c3 = width, width * 2, width * 4
+    flat = c3 * (size // 4) * (size // 4)
+    return Sequential(
+        [
+            Conv2D(1, c1, k=3, stride=1, pad=1, rng=rng),
+            ReLU(),
+            Conv2D(c1, c2, k=3, stride=1, pad=1, rng=rng),
+            ReLU(),
+            MaxPool2D(2),
+            Conv2D(c2, c3, k=3, stride=1, pad=1, rng=rng),
+            ReLU(),
+            MaxPool2D(2),
+            Flatten(),
+            Dense(flat, 256, rng=rng),
+            ReLU(),
+            Dense(256, 64, rng=rng),
+            ReLU(),
+            Dense(64, 5, rng=rng),
+        ],
+        input_shape=(1, size, size),
+    )
 
 
 def export_models(model: Sequential, name: str, out_dir: Path, quantize: bool) -> dict[str, Path]:
@@ -123,8 +155,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--test-size", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=2e-3)
-    parser.add_argument("--size", type=int, default=32, help="frame size in pixels")
-    parser.add_argument("--width", type=int, default=8, help="first conv width (second conv is 2x)")
+    parser.add_argument("--size", type=int, default=64, help="input frame size in pixels; camera-ready models use a larger crop")
+    parser.add_argument("--width", type=int, default=24, help="base channels for the camera-ready CNN")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--name", default="image_recognition")
     parser.add_argument("--out", type=Path, default=MODELS_DIR)
@@ -140,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     train_ds = make_dataset(args.train_size, args.size, seed=args.seed)
     test_ds = make_dataset(args.test_size, args.size, seed=args.seed + 1)
 
-    model = build_tiny_cnn(args.size, args.width, args.seed)
+    model = build_camera_cnn(args.size, args.width, args.seed)
     print(model.summary())
 
     train(model, train_ds, test_ds, args.epochs, args.batch_size, args.lr, args.seed)
