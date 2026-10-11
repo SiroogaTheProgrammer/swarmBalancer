@@ -31,6 +31,23 @@ def split_strategy(name: str) -> tuple[str, str]:
     return name, "none"
 
 
+def known_strategies() -> tuple[str, ...]:
+    """The built-in designs plus every plugin tactic registered so far (``swarm.sdk.use_package``)."""
+    from swarm.sim.strategies import plugin_strategies
+
+    return ALL_STRATEGIES + tuple(sorted(plugin_strategies()))
+
+
+def strategy_note(name: str) -> str:
+    """One-line description of a built-in design or a registered plugin tactic."""
+    if name in STRATEGY_NOTES:
+        return STRATEGY_NOTES[name]
+    from swarm.sim.strategies import NODE_CLASSES
+
+    cls = NODE_CLASSES.get(split_strategy(name)[0])
+    return getattr(cls, "summary", "") or ""
+
+
 @dataclass(frozen=True)
 class Swarm:
     """Who is in the swarm. The leader is elected by capability, not by position in this list."""
@@ -85,9 +102,11 @@ class BrainSpec:
     ``auto`` uses ``model`` inside the C++ engine if both exist, else numpy, else the oracle.
     The oracle has no weights: it answers with the ground truth at ``accuracy`` and costs ``macs``
     per frame - use it to explore hypothetical model sizes without training anything.
+    ``package`` runs an SDK brain package; ``model`` is then its directory (see docs/SDK.md). ``auto``
+    also accepts a package directory.
     """
 
-    kind: str = "auto"                # auto | oracle | numpy | native
+    kind: str = "auto"                # auto | oracle | numpy | native | package
     model: str = "models/tiny_cnn_int8.swm"
     macs: int = 401_568               # oracle: MACs per frame
     accuracy: float = 0.87            # oracle: P(correct class)
@@ -158,9 +177,11 @@ class Scenario:
     tags: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        unknown = [s for s in self.strategies if s not in ALL_STRATEGIES]
-        if unknown or self.baseline not in ALL_STRATEGIES:
-            raise ValueError(f"unknown strategies {unknown or [self.baseline]}; known: {ALL_STRATEGIES}")
+        known = known_strategies()
+        unknown = [s for s in self.strategies if s not in known]
+        if unknown or self.baseline not in known:
+            raise ValueError(f"unknown strategies {unknown or [self.baseline]}; known: {known} "
+                             "(plugin tactics: load their package first with swarm.sdk.use_package)")
         if self.duration <= 0 or self.camera.fps <= 0:
             raise ValueError("duration and fps must be positive")
 

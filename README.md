@@ -6,6 +6,8 @@ The existing training, simulator, C++ kernels, stress harness and standardized s
 
 | Part | Start here |
 | --- | --- |
+| **3D studio** | `python -m swarm.studio` - tactical console: plan scenarios, pick/upload brains and tactics, watch the swarm in 3D ([docs/STUDIO.md](docs/STUDIO.md)) |
+| **Brain & tactic SDK** | `python -m swarm.sdk` - write, validate, upload and export perception brains and coordination tactics ([docs/SDK.md](docs/SDK.md)) |
 | **Testing toolkit** | Existing [dev.py](dev.py), scenarios and benchmark commands below |
 | **Device runtime** | [docs/RUNTIME.md](docs/RUNTIME.md): TLS 1.3 mutual authentication, pinned peers, bounded inference and worker failover |
 | **Select a brain / export to USB** | [setup_device.py](setup_device.py): desktop picker or CLI; [operator workflow](docs/DEPLOYMENT.md) |
@@ -27,6 +29,26 @@ The setup program prepares only the runtime, robot-interface SDK and explicitly 
 Provision each Pi's identity locally and authenticate public keys out of band first. Then **prepare → sign/encrypt for that device → copy to mounted USB → verify/install on the booted Pi → launch explicitly**. The installer checks identity, target, signature, file hashes and increasing release version. No disk flashing, formatting, automatic SSH, automatic launch, or network motor commands are involved. A Pi's USB power socket is not a universal firmware-upload interface.
 
 The live runtime needs only Python's standard library/TLS; cryptography is an optional dependency for provisioning and bundle operations. The overall development distribution still includes numpy for the toolkit. No claim is made of an unbreakable, independently audited or flight-certified system. Physical Pi/USB/RF and motor commissioning remain to be tested on the intended hardware.
+
+## 3D studio and SDK
+
+```powershell
+python -m swarm.studio                 # or: python dev.py studio  - opens the SWARM//OPS console
+python -m swarm.sdk new my_tactic --type tactic     # write your own swarm tactic (or a perception brain)
+python -m swarm.sdk validate brains/my_tactic       # conformance: physics, determinism, survives losses
+```
+
+The studio is a local, offline console with a military operations-center look. It covers:
+
+* **OPS**: 3D playback of every design in a scenario. You see cameras and footprints, frames, results and heartbeats moving over the shared radio, CPU load, suspicions, leader elections and failures, objects being sighted, classified and reported, and the frames the cameras actually captured.
+* **MISSION PLANNER**: edits every field of a battery `Scenario`, executes it, and saves it as a runnable preset (`scenarios/studio/`, or straight into the battery).
+* **ARMORY**: uploads, scaffolds, validates, compiles and exports brains and tactics.
+* **AFTER-ACTION**: the battery's report for a run.
+* **FIELD MANUAL**: these docs.
+
+Simulations run in worker processes through `run_scenario(trace=True)`. The trace only observes, so the console shows exactly the battery's numbers.
+
+[docs/SDK.md](docs/SDK.md) is the library manual. A perception brain is either a compiled `.swm` network, which the C++ engine runs on every device including MCUs, or a numpy class, which runs on Linux companions. A tactic is a `SwarmNode` subclass that the simulator and battery run next to `local`/`central`/`striped`. [examples/brains/](examples/brains) has one of each. The example `load_aware_stripe` tactic wins the s11 heterogeneous yardstick: busiest CPU 3% instead of 100%.
 
 ## Testing toolkit
 
@@ -166,7 +188,7 @@ The **device runtime** uses actual TLS connections, load announcements, bounded 
 ## Layout
 
 ```
-dev.py               one entry point: doctor | build | test | train | bench | all (finds the toolchain itself)
+dev.py               one entry point: doctor | build | test | train | bench | studio | all (finds the toolchain itself)
 setup_device.py      separate device setup GUI/CLI: select a brain, assemble, sign/encrypt, export to USB
 cmake/               toolchain-auto.cmake: picks llvm-mingw + ninja + target CPU on Windows before project()
 cpp/                 C++ brain: include/swarm/*.hpp, src/*.cpp, tools/ (bench_matmul, run_model), tests/
@@ -175,19 +197,25 @@ python/swarm/
   brain/             numpy layers (fwd+bwd), Sequential, .swm format, ctypes bridge to the C++ engine
   train/             synthetic overhead-imagery dataset, tiny CNN trainer
   devices/           device profiles (MHz, MACs/cycle, RAM, radio)
-  sim/               simulator core, channel, membership, brains, strategies, CLI
+  sim/               simulator core, channel, membership, brains, strategies (+ plugin registry), trace recorder, CLI
   stress/            device stress harness
   bench/             scenario presets: dataclasses, runner (twin run, survivability, checks), reports, battery CLI
+  sdk/               brain & tactic SDK: packages, Tactic/PerceptionBrain API, validation, install, device export, CLI
+  studio/            3D console: stdlib HTTP server, worker processes, scenario I/O, static WebGL UI
   runtime/           stdlib device-side TLS mesh, bounded scheduler, local brain factories
   deploy/            optional crypto: identity enrollment, signed encrypted bundles, atomic USB install/launch
   robotics/          stdlib local hardware-adapter SDK, dry run, explicit arming and watchdog guard
 deploy/raspberry_pi/  node config and hardware-disabled application/service examples
 examples/robots/     dry-run motor/attachment profiles and external-driver integration examples
+examples/brains/     SDK example packages: edge_detector (python brain), micro_cnn (.swm), load_aware_stripe (tactic)
+brains/              packages uploaded in the studio or created with `python -m swarm.sdk new` (git-ignored)
 scenarios/           the standardized battery (s01..s12) + _template.py; each file is runnable
+scenarios/studio/    presets saved by the studio (runnable, not part of the battery)
 tests/               pytest suite (C++ engine tests are skipped if it is not built)
 models/              trained .swm files (git-ignored; regenerate with the trainer)
 out/bench/           reports written by the battery (git-ignored)
-docs/                ARCHITECTURE.md, MODEL_FORMAT.md
+out/studio/          studio runs, validation cache, device exports (git-ignored)
+docs/                ARCHITECTURE.md, MODEL_FORMAT.md, SDK.md, STUDIO.md, ...
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for design details and how to extend (new layer, new device, new strategy).

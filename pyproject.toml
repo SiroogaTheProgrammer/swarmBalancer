@@ -17,9 +17,14 @@ deploy = ["cryptography>=44"]
 swarm-worker = "swarm.runtime.cli:main"
 swarm-deploy = "swarm.deploy.cli:main"
 swarm-setup = "swarm.deploy.setup:main"
+swarm-studio = "swarm.studio.server:main"
+swarm-sdk = "swarm.sdk.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["python"]
+
+[tool.setuptools.package-data]
+"swarm.studio" = ["static/*.html", "static/css/*.css", "static/js/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

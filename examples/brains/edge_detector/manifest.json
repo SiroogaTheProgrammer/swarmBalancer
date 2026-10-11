@@ -1,0 +1,12 @@
+{
+  "schema": "swarm.package/1",
+  "name": "edge_detector",
+  "version": "1.0.0",
+  "type": "perception",
+  "format": "python",
+  "entry": "brain.py:EdgeDetector",
+  "title": "Edge detector (classical CV)",
+  "description": "Thresholds and blob extents instead of a neural network: about 4 operations per pixel, numpy only, deployable to Linux companions.",
+  "author": "swarmBalancer examples",
+  "options": {"bright": 0.72, "dark": 0.17, "road_span": 0.82}
+}

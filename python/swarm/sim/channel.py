@@ -77,7 +77,10 @@ class Channel:
         m.energy_j += src.profile.energy_joules(0, msg.size + self.HEADER_BYTES)
         msg.t_sent = self.sim.now
         done = self._book(msg)
-        if self.sim.rng.random() < self.loss:
+        lost = self.sim.rng.random() < self.loss
+        if self.sim.tracer is not None:
+            self.sim.trace("tx", src.id, dst.id, msg, done - self._airtime(msg.size), done, done + self.latency, lost)
+        if lost:
             m.messages_lost += 1
             return
         self.sim.schedule(done - self.sim.now + self.latency, self._deliver, src.id, dst, msg)
@@ -92,13 +95,17 @@ class Channel:
         m.energy_j += src.profile.energy_joules(0, msg.size + self.HEADER_BYTES)
         msg.t_sent = self.sim.now
         done = self._book(msg)
+        lost_by: list[int] = []
         for dst in self.sim.nodes:
             if dst is src:
                 continue
             if self.sim.rng.random() < self.loss:
                 m.messages_lost += 1
+                lost_by.append(dst.id)
                 continue
             self.sim.schedule(done - self.sim.now + self.latency, self._deliver, src.id, dst, msg)
+        if self.sim.tracer is not None:
+            self.sim.trace("bcast", src.id, msg, done - self._airtime(msg.size), done, done + self.latency, lost_by)
 
     def _deliver(self, src_id: int, dst: Node, msg: Message) -> None:
         if dst.alive:

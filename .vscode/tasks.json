@@ -6,6 +6,21 @@
   },
   "tasks": [
     {
+      "label": "studio: 3D tactical console",
+      "type": "shell",
+      "command": "python -m swarm.studio",
+      "isBackground": true,
+      "problemMatcher": [],
+      "detail": "SWARM//OPS: plan scenarios, pick/upload brains and tactics, watch the swarm in 3D (local, offline)."
+    },
+    {
+      "label": "sdk: validate package (folder open in the editor)",
+      "type": "shell",
+      "command": "python -m swarm.sdk validate ${fileDirname}",
+      "problemMatcher": [],
+      "detail": "Conformance checks for the brain/tactic package containing the file you are editing."
+    },
+    {
       "label": "device: setup and USB export",
       "type": "shell",
       "command": "python setup_device.py",

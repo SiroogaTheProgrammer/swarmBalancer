@@ -1,0 +1,13 @@
+{
+  "schema": "swarm.package/1",
+  "name": "micro_cnn",
+  "version": "1.0.0",
+  "type": "perception",
+  "format": "swm",
+  "model": "model.swm",
+  "build": "train.py",
+  "classes": ["nothing", "vehicle", "building", "road", "aircraft"],
+  "title": "Micro CNN (MCU-class)",
+  "description": "Small int8 convolutional network (~0.24 MMAC/frame, ~20 KB) that fits Cortex-M4 drones; train.py compiles it to model.swm for the C++ engine.",
+  "author": "swarmBalancer examples"
+}

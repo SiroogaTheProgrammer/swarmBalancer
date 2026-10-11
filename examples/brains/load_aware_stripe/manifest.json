@@ -1,0 +1,11 @@
+{
+  "schema": "swarm.package/1",
+  "name": "load_aware_stripe",
+  "version": "1.0.0",
+  "type": "tactic",
+  "entry": "tactic.py:LoadAwareStripe",
+  "strategy": "load_aware",
+  "title": "Load-aware stripe",
+  "description": "Striped design with frames dealt in proportion to each member's speed (smooth weighted round-robin) and backpressure from heartbeat queue reports - the s11 heterogeneous yardstick.",
+  "author": "swarmBalancer examples"
+}

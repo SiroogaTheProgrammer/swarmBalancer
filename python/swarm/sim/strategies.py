@@ -27,6 +27,10 @@ footing:
 Fault tolerance is identical for all three: heartbeats -> suspicion ->
 ``on_member_change`` -> the rotation / leader is recomputed from the same
 deterministic rule on every node.
+
+More designs can be plugged in without editing this file: a ``SwarmNode``
+subclass registered with :func:`register_strategy` (the ``swarm.sdk`` tactic
+packages do this) is built by :func:`build_swarm` like the built-ins.
 """
 
 from __future__ import annotations
@@ -67,6 +71,11 @@ class SwarmConfig:
 class SwarmNode(Node):
     """Common machinery: camera, brain, membership. Strategies subclass this."""
 
+    # "all": every member's camera runs at the scenario fps; "single": one camera (the leader's) at the
+    # scenario's striped_fps, so a one-camera design is fed as many frames as N cameras.
+    camera_mode = "all"
+    summary = ""  # one line for reports / the studio; built-ins are described in bench.scenario.STRATEGY_NOTES
+
     def __init__(self, profile: DeviceProfile, brain: Brain, cfg: SwarmConfig, channel: Channel, seed: int,
                  name: str | None = None, pool: FramePool | None = None):
         super().__init__(profile, name, queue_limit=cfg.queue_limit)
@@ -97,6 +106,8 @@ class SwarmNode(Node):
         pass
 
     def on_killed(self) -> None:
+        if self.camera_on:
+            self.sim.trace("camera", self.id, False)
         self.camera_on = False
         self._was_leader = False
 
@@ -116,6 +127,8 @@ class SwarmNode(Node):
             self.sim.metrics.leader_changes += 1
             self.sim.event("leader", self.id)
             self.sim.log(f"node {self.id} ({self.name}) is now LEADER")
+        elif self._was_leader and not now_leader:
+            self.sim.trace("step_down", self.id)  # a better-ranked node is back in this node's view
         self._was_leader = now_leader
 
     def rebalance(self, node_id: int, alive: bool) -> None:
@@ -127,9 +140,12 @@ class SwarmNode(Node):
             return
         self.camera_on = True
         self._camera_epoch += 1
+        self.sim.trace("camera", self.id, True)
         self.sim.schedule(0.0, self._tick, self._camera_epoch)
 
     def stop_camera(self) -> None:
+        if self.camera_on:
+            self.sim.trace("camera", self.id, False)
         self.camera_on = False
 
     def _tick(self, epoch: int) -> None:
@@ -145,7 +161,9 @@ class SwarmNode(Node):
         self.sim.metrics.frames_captured += 1
         if label != 0:
             self.sim.metrics.objects_captured += 1
-        return Frame(id=self.sim.metrics.frames_captured, t_capture=self.sim.now, src=self.id, image=image, label=label)
+        frame = Frame(id=self.sim.metrics.frames_captured, t_capture=self.sim.now, src=self.id, image=image, label=label)
+        self.sim.trace("capture", self.id, frame)
+        return frame
 
     def on_capture(self, frame: Frame) -> None:
         raise NotImplementedError
@@ -156,6 +174,7 @@ class SwarmNode(Node):
         ok = self.compute(macs, cb, *args)
         if not ok:
             self.sim.metrics.frames_rejected += 1
+            self.sim.trace("reject", self.id, args[0].id if args and isinstance(args[0], Frame) else -1)
             self.sim.log(f"node {self.id} queue full - rejected work")
         return ok
 
@@ -171,6 +190,7 @@ class SwarmNode(Node):
             m.correct += 1
         if pred != 0:
             m.detections += 1
+        self.sim.trace("infer", self.id, frame.id, pred, conf, frame.label)
         then(frame, pred, conf, *args)
 
     def useful(self, pred: int, conf: float) -> bool:
@@ -187,12 +207,13 @@ class SwarmNode(Node):
                                       size=RESULT_BYTES))
 
     def leader_learns(self, frame: Frame | None, pred: int, conf: float, t_capture: float | None = None,
-                      label: int | None = None) -> None:
+                      label: int | None = None, fid: int = -1) -> None:
         """The leader now knows the result for a frame - the moment the swarm can act on it."""
         m = self.sim.metrics
         if frame is not None:
-            t_capture, label = frame.t_capture, frame.label
+            t_capture, label, fid = frame.t_capture, frame.label, frame.id
         m.learn_times.append(self.sim.now)
+        self.sim.trace("learn", self.id, fid, pred, conf, label, t_capture)
         if pred != 0:
             # latency is measured on detections only: "how long until the leader knows something is there";
             # counting every frame would favour designs whose leader inspects its own frames locally
@@ -212,8 +233,8 @@ class SwarmNode(Node):
             handler(src, msg)
 
     def on_result(self, src: int, msg: Message) -> None:
-        _fid, pred, conf, t_capture, label = msg.payload
-        self.leader_learns(None, pred, conf, t_capture, label)
+        fid, pred, conf, t_capture, label = msg.payload
+        self.leader_learns(None, pred, conf, t_capture, label, fid=fid)
 
     def on_cmd(self, src: int, msg: Message) -> None:
         pass  # followers act on the leader's decision; nothing to model yet
@@ -293,6 +314,8 @@ class CentralNode(SwarmNode):
 # striped: leader's camera, everyone's brain
 # ----------------------------------------------------------------------------
 class StripedNode(SwarmNode):
+    camera_mode = "single"
+
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self._rr = 0
@@ -354,13 +377,44 @@ class StripedNode(SwarmNode):
 
 
 NODE_CLASSES = {"local": LocalNode, "central": CentralNode, "striped": StripedNode}
+BUILTIN_STRATEGIES = frozenset(NODE_CLASSES)
+_PLUGIN_SOURCES: dict[str, str] = {}
+
+
+def register_strategy(name: str, cls: type, source: str = "") -> None:
+    """Makes a plugin tactic (a ``SwarmNode`` subclass, see ``swarm.sdk``) available to ``build_swarm``.
+
+    Re-registering a name from the same ``source`` replaces it (edit -> reload); a different source may not
+    shadow it, and built-in names are reserved.
+    """
+    if not isinstance(name, str) or not name.isidentifier() or name != name.lower():
+        raise ValueError(f"strategy name {name!r} must be a lower-case identifier")
+    if name in BUILTIN_STRATEGIES:
+        raise ValueError(f"{name!r} is a built-in strategy and cannot be replaced by a plugin")
+    if not (isinstance(cls, type) and issubclass(cls, SwarmNode)):
+        raise TypeError(f"strategy {name!r} must be a SwarmNode subclass, got {cls!r}")
+    if cls.camera_mode not in ("all", "single"):
+        raise ValueError(f"strategy {name!r}: camera_mode must be 'all' or 'single'")
+    previous = _PLUGIN_SOURCES.get(name)
+    if previous is not None and previous != source:
+        raise ValueError(f"strategy {name!r} is already provided by {previous}")
+    NODE_CLASSES[name] = cls
+    _PLUGIN_SOURCES[name] = source
+
+
+def plugin_strategies() -> dict[str, str]:
+    """Registered plugin tactic name -> source it was loaded from."""
+    return dict(_PLUGIN_SOURCES)
 
 
 def build_swarm(sim: Simulator, cfg: SwarmConfig, profiles: list[DeviceProfile], brain: Brain, channel_bps: float,
                 channel_latency: float, channel_loss: float, seed: int = 0,
                 pool: FramePool | None = None, qos: bool = True) -> tuple[Channel, list[SwarmNode]]:
     channel = Channel(sim, channel_bps, channel_latency, channel_loss, qos=qos)
-    cls = NODE_CLASSES[cfg.strategy]
+    cls = NODE_CLASSES.get(cfg.strategy)
+    if cls is None:
+        raise KeyError(f"unknown strategy {cfg.strategy!r}; known: {sorted(NODE_CLASSES)} "
+                       "(plugin tactics must be loaded first, e.g. swarm.sdk.use_package)")
     nodes = [sim.add_node(cls(p, brain, cfg, channel, seed, name=f"{p.name}#{i}", pool=pool))
              for i, p in enumerate(profiles)]
     for n in nodes:

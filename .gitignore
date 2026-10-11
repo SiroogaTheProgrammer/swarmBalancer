@@ -16,6 +16,12 @@ compile_commands.json
 # Trained artifacts (regenerate with `python -m swarm.train.train_tiny_cnn`)
 models/*.swm
 models/*.npz
+# compiled example networks (regenerate with the package's train.py or COMPILE in the studio)
+examples/brains/*/model.swm
+
+# Packages uploaded in the studio / created with `python -m swarm.sdk new` (keep yours in your own repo)
+brains/*
+!brains/README.md
 
 # Sim / stress outputs
 out/

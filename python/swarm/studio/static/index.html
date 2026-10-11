@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>SWARM//OPS - tactical swarm simulation console</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2l12 7v14l-12 7-12-7V9z' fill='none' stroke='%232be4ff' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%23ffb627'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/css/ops.css">
+</head>
+<body>
+<div class="classbar">UNCLASSIFIED // SIMULATION ENVIRONMENT // NOT FOR OPERATIONAL USE</div>
+
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true">
+      <path d="M16 2l12 7v14l-12 7-12-7V9z" fill="none" stroke="#2be4ff" stroke-width="1.6"/>
+      <path d="M16 8l6 3.5v7L16 22l-6-3.5v-7z" fill="none" stroke="#1aa9c2" stroke-width="1"/>
+      <circle cx="16" cy="15" r="2.4" fill="#ffb627"/>
+      <circle cx="10" cy="11.5" r="1.3" fill="#2be4ff"/><circle cx="22" cy="11.5" r="1.3" fill="#2be4ff"/>
+      <circle cx="10" cy="19" r="1.3" fill="#2be4ff"/><circle cx="22" cy="19" r="1.3" fill="#2be4ff"/>
+    </svg>
+    <div>
+      <div class="name">SWARM<b>//</b>OPS</div>
+      <div class="sub">TACTICAL SWARM SIMULATION CONSOLE</div>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-view="ops"><span class="k">F1</span>OPS</button>
+    <button class="tab" data-view="planner"><span class="k">F2</span>MISSION PLANNER</button>
+    <button class="tab" data-view="armory"><span class="k">F3</span>ARMORY</button>
+    <button class="tab" data-view="aar"><span class="k">F4</span>AFTER-ACTION</button>
+    <button class="tab" data-view="manual"><span class="k">F5</span>FIELD MANUAL</button>
+  </nav>
+  <div class="status">
+    <div class="stat jobs-pill" id="jobs-pill"><div class="spinner"></div><div><div class="l">TASKING</div><div class="v" id="jobs-text">-</div></div></div>
+    <div class="stat"><div class="l">OPERATION</div><div class="v" id="st-op">NONE</div></div>
+    <div class="stat"><div class="l">MISSION CLOCK</div><div class="v" id="st-clock">T+00:00.000</div></div>
+    <div class="stat"><div class="l">BRAIN ENGINE</div><div class="v" id="st-engine">-</div></div>
+    <div class="stat"><div class="l">LINK</div><div class="v ok" id="st-link">LOCAL</div></div>
+    <button class="menu-btn" id="menu-btn" title="System menu">&#9776;</button>
+  </div>
+</header>
+
+<main>
+  <!-- ============================================================ OPS -->
+  <section class="view active" id="view-ops">
+    <aside class="panel" id="ops-left">
+      <div class="hdr">Operation<span class="r" id="ops-runid"></span></div>
+      <div class="mission-card" id="mission-card"><div class="t">NO ACTIVE OPERATION</div><div class="d">Plan a mission or pick a preset in MISSION PLANNER, then EXECUTE.</div></div>
+      <div class="hdr">ORBAT<span class="r" id="orbat-count"></span></div>
+      <ul class="orbat scroll" id="orbat"></ul>
+      <div class="hdr">Swarm design<span class="r">vs baseline</span></div>
+      <div class="body" id="design-card"></div>
+    </aside>
+
+    <div id="ops-center">
+      <canvas id="gl"></canvas>
+      <div id="labels"></div>
+      <div class="scanlines"></div>
+      <div class="vignette"></div>
+      <div class="hud" id="hud-tl"></div>
+      <div class="hud" id="hud-tr">
+        <div class="viewbtns pe">
+          <button class="btn small on" data-cam="swarm" title="Keep the swarm in view (V)">TRACK SWARM</button>
+          <button class="btn small" data-cam="asset" title="Follow the selected asset">TRACK ASSET</button>
+          <button class="btn small" data-cam="top" title="Top-down ISR view (T)">TOP-DOWN</button>
+          <button class="btn small" data-cam="free" title="Free camera">FREE</button>
+          <button class="btn small" id="legend-btn" title="Legend (L)">LEGEND</button>
+        </div>
+        <div class="legend pe" id="legend">
+          <div><i style="background:#2be4ff"></i>friendly asset / frame packet</div>
+          <div><i style="background:#ffb627"></i>swarm leader / command broadcast</div>
+          <div><i style="background:#ff3b4d"></i>offline asset / lost packet / suspicion</div>
+          <div><i style="background:#3dffa0"></i>detection report (result)</div>
+          <div><i style="background:#a78bfa"></i>feature map (split inference)</div>
+          <div><i class="ring" style="color:#cfe8ff;border-color:#cfe8ff"></i>heartbeat broadcast</div>
+          <div><i class="sq" style="background:#ffe14d"></i>sighted, not yet classified</div>
+          <div><i class="sq" style="background:#ff3b4d"></i>confirmed track (leader knows)</div>
+          <div><i class="sq" style="background:#ffb627"></i>track with wrong class</div>
+          <div><i class="sq" style="background:#ff4fd8"></i>false alarm</div>
+          <div><i class="sq" style="background:#4b5d6b"></i>missed / never processed</div>
+          <div class="muted" style="margin-top:6px">packet flight is stretched to stay visible;<br>exact times are in the inspector</div>
+        </div>
+      </div>
+      <div class="hud" id="hud-center"></div>
+      <div class="hud" id="hud-bl"></div>
+      <div class="hud" id="hud-br"><canvas id="minimap" width="420" height="420"></canvas></div>
+      <div class="empty-state" id="ops-empty"><b>NO ACTIVE OPERATION</b>OPEN MISSION PLANNER (F2) AND EXECUTE A SCENARIO</div>
+    </div>
+
+    <aside class="panel" id="ops-right">
+      <div class="hdr" id="insp-hdr">Inspector</div>
+      <div class="body" id="inspector"><div class="muted">Click an asset or a track in the theatre.</div></div>
+      <div class="hdr">Sensor feed<span class="r" id="sensor-src"></span></div>
+      <div id="sensor"><canvas id="sensor-canvas" width="256" height="205"></canvas><div class="ov" id="sensor-ov"></div><div class="nosig" id="sensor-nosig">NO SIGNAL</div></div>
+      <div class="hdr">Event log<span class="r" id="log-count"></span></div>
+      <div class="scroll" id="eventlog" style="flex:1"></div>
+    </aside>
+
+    <div id="ops-bottom">
+      <div class="tl-controls">
+        <button class="btn" id="tl-start" title="Start (Home)">&#9198;</button>
+        <button class="btn" id="tl-prev" title="Previous event ([)">&#9664;&#9664;</button>
+        <button class="btn primary" id="tl-play" title="Play / pause (Space)">&#9654;</button>
+        <button class="btn" id="tl-next" title="Next event (])">&#9654;&#9654;</button>
+        <div class="tl-time" id="tl-time">T+00:00.000<small>/ 00:00.000</small></div>
+      </div>
+      <div class="tl-wrap"><canvas id="timeline"></canvas></div>
+      <div class="tl-right">
+        <label class="f">SPEED<select id="tl-speed">
+          <option value="0.05">0.05x</option><option value="0.1">0.1x</option><option value="0.25">0.25x</option>
+          <option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option>
+          <option value="4">4x</option><option value="8">8x</option></select></label>
+        <label class="chk"><input type="checkbox" id="tl-loop">LOOP</label>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ PLANNER -->
+  <section class="view" id="view-planner">
+    <aside class="panel">
+      <div class="hdr">Mission library<span class="r" id="preset-count"></span></div>
+      <div class="body" style="padding:6px 8px;flex:none"><input id="preset-filter" placeholder="filter presets..." style="width:100%"></div>
+      <ul class="presets scroll" id="preset-list"></ul>
+      <div class="body" style="flex:none;border-top:1px solid var(--line)"><button class="btn" id="pl-new" style="width:100%">+ NEW BLANK MISSION</button></div>
+    </aside>
+    <div class="form" id="planner-form"></div>
+    <aside class="panel">
+      <div class="hdr">OPORD<span class="r" id="opord-state"></span></div>
+      <div class="valid" id="pl-valid"></div>
+      <div class="scroll" style="flex:1"><div class="opord" id="opord"></div></div>
+      <div class="body" style="flex:none;border-top:1px solid var(--line);display:grid;gap:7px">
+        <label class="chk"><input type="checkbox" id="pl-stress">run device stress test (slower)</label>
+        <button class="btn execute" id="pl-exec">&#9655; EXECUTE SIMULATION</button>
+        <div class="btnrow">
+          <button class="btn grow" id="pl-save">SAVE PRESET</button>
+          <button class="btn grow" id="pl-battery" title="Save into scenarios/ - joins python -m swarm.bench">ADD TO BATTERY</button>
+        </div>
+        <div class="btnrow">
+          <button class="btn grow" id="pl-export">EXPORT JSON</button>
+          <button class="btn danger grow" id="pl-delete">DELETE PRESET</button>
+        </div>
+      </div>
+    </aside>
+  </section>
+
+  <!-- ============================================================ ARMORY -->
+  <section class="view" id="view-armory">
+    <div class="panel" style="border-right:0">
+      <div class="hdr">Armory - perception brains &amp; coordination tactics<span class="r" id="armory-count"></span></div>
+      <div class="armory-top">
+        <label class="dropzone" id="dropzone">
+          <input type="file" id="upload-input" accept=".zip,.swm,.py" multiple hidden>
+          <span>&#8682;</span><span><b>UPLOAD</b><br>drop a package .zip, a compiled .swm network or a single .py tactic/brain</span>
+        </label>
+        <div class="newpkg">
+          <input id="np-name" placeholder="new_package_name">
+          <select id="np-type"><option value="perception-python">perception / python</option><option value="perception-swm">perception / .swm network</option><option value="tactic">coordination tactic</option></select>
+          <button class="btn primary" id="np-create">CREATE</button>
+          <div class="muted" style="grid-column:1/-1;font-size:10.5px">scaffold a package in brains/ that validates out of the box - then edit it in your editor</div>
+        </div>
+      </div>
+      <div class="cards" id="cards"></div>
+    </div>
+    <aside class="panel" id="armory-detail"><div class="hdr">Dossier</div><div class="body muted">Select a brain or a tactic.</div></aside>
+  </section>
+
+  <!-- ============================================================ AAR -->
+  <section class="view" id="view-aar">
+    <aside class="panel">
+      <div class="hdr">Run archive<span class="r" id="runs-count"></span></div>
+      <ul class="runs scroll" id="runs-list"></ul>
+    </aside>
+    <div class="aar" id="aar"><div class="muted">No run loaded.</div></div>
+  </section>
+
+  <!-- ============================================================ MANUAL -->
+  <section class="view" id="view-manual">
+    <aside class="panel">
+      <div class="hdr">Field manuals</div>
+      <ul class="doclist" id="doclist"></ul>
+      <div class="hdr">Contents</div>
+      <div class="toc scroll" id="toc" style="flex:1"></div>
+    </aside>
+    <div class="md" id="doc"></div>
+  </section>
+</main>
+
+<div class="classbar">UNCLASSIFIED // SIMULATION ENVIRONMENT // NOT FOR OPERATIONAL USE</div>
+
+<div id="boot"><div class="term">
+  <div class="big">SWARM<b>//</b>OPS</div>
+  <div class="tag2">TACTICAL SWARM SIMULATION CONSOLE</div>
+  <div id="boot-lines"></div>
+  <div class="deny" id="boot-deny"><b>ACCESS DENIED</b>This console only opens through the link printed by <code>python -m swarm.studio</code>
+    (it carries the session token). Start the studio from a terminal, or reopen its link.</div>
+</div></div>
+<div id="toasts"></div>
+<div id="modal"><div class="panel"><div class="hdr" id="modal-title"></div><div class="body" id="modal-body"></div><div class="mfoot" id="modal-foot"></div></div></div>
+<div class="dropdown" id="menu">
+  <button data-act="rerun">Re-run current operation</button>
+  <button data-act="runs">Open run archive</button>
+  <button data-act="catalog">Refresh catalog</button>
+  <button data-act="help">Keyboard shortcuts</button>
+  <button data-act="shutdown" style="color:#ff8a95">Shut down studio</button>
+</div>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

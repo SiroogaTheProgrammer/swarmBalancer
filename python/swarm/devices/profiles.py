@@ -7,6 +7,9 @@ order-of-magnitude figures for the class of hardware named; tune them against
 real boards as you get them (``compute_seconds`` is the single place that
 turns MACs into time).
 
+``tags`` mark the class of member; "linux" means a companion computer that can also host a Python
+brain (MCU-class members run only the C++ engine).
+
 ``macs_per_cycle`` is *effective* throughput of the int8/f32 GEMM kernel on
 that core (SIMD width x pipelines x achieved utilisation), which is why a
 Cortex-M4 gets 0.5 and a Cortex-A72 with NEON gets 8.
@@ -64,14 +67,14 @@ DEVICE_PROFILES: dict[str, DeviceProfile] = {
             "Quad Cortex-A53 companion computer (Raspberry Pi 3 class) on a small drone",
             cpu_mhz=1200, macs_per_cycle=4.0, ram_bytes=64 * 1024 * 1024,
             radio_bps=6e6, radio_latency_s=0.002, energy_per_mac_nj=0.1, energy_per_bit_nj=20,
-            tags=("drone",),
+            tags=("drone", "linux"),
         ),
         DeviceProfile(
             "drone-a72",
             "Cortex-A72 companion computer (Raspberry Pi 4 class) - the 'command drone'",
             cpu_mhz=1500, macs_per_cycle=8.0, ram_bytes=512 * 1024 * 1024,
             radio_bps=20e6, radio_latency_s=0.002, energy_per_mac_nj=0.08, energy_per_bit_nj=15,
-            tags=("drone", "leader"),
+            tags=("drone", "leader", "linux"),
         ),
         DeviceProfile(
             "cubesat-obc",
@@ -85,14 +88,14 @@ DEVICE_PROFILES: dict[str, DeviceProfile] = {
             "Small-sat payload processor (Cortex-A class, e.g. Zynq PS) doing on-orbit image recognition",
             cpu_mhz=667, macs_per_cycle=4.0, ram_bytes=128 * 1024 * 1024,
             radio_bps=1e6, radio_latency_s=0.010, energy_per_mac_nj=0.2, energy_per_bit_nj=1000,
-            tags=("satellite",),
+            tags=("satellite", "linux"),
         ),
         DeviceProfile(
             "host",
             "This development PC (no throttling) - used to measure real kernel speed",
             cpu_mhz=3000, macs_per_cycle=32.0, ram_bytes=8 * 1024 * 1024 * 1024,
             radio_bps=1e9, radio_latency_s=0.0001,
-            tags=("host",),
+            tags=("host", "linux"),
         ),
     ]
 }

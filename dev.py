@@ -6,6 +6,7 @@
     python dev.py test        ctest + pytest
     python dev.py train       train the tiny CNN -> models/*.swm (skipped if they exist; --force to retrain)
     python dev.py bench       the standardized scenario battery (reports in out/bench/)
+    python dev.py studio      the 3D studio (SWARM//OPS console) - extra arguments go to python -m swarm.studio
     python dev.py all         doctor, build, test, train, bench
 
 Standard library only, so it runs before numpy/pytest are installed (it will offer
@@ -232,6 +233,13 @@ def bench(args: list[str]) -> int:
     return run([sys.executable, "-m", "swarm.bench", *args], check=False)
 
 
+def studio(args: list[str]) -> int:
+    ensure_python_deps()
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT / "python") + os.pathsep + env.get("PYTHONPATH", "")
+    return run([sys.executable, "-m", "swarm.studio", *args], env=env, check=False)
+
+
 def main(argv: list[str] | None = None) -> int:
     # Preserve all toolkit commands. Device tools are explicit, separate opt-ins,
     # passed through without loading a model, installing a driver or opening hardware.
@@ -255,6 +263,8 @@ def main(argv: list[str] | None = None) -> int:
     tr.add_argument("--epochs", type=int, default=3)
     be = sub.add_parser("bench", help="extra arguments are passed to `python -m swarm.bench`")
     be.add_argument("rest", nargs=argparse.REMAINDER)
+    st = sub.add_parser("studio", help="3D studio; extra arguments are passed to `python -m swarm.studio`")
+    st.add_argument("rest", nargs=argparse.REMAINDER)
     a = sub.add_parser("all")
     a.add_argument("--clean", action="store_true")
     for command, module in device_tools.items():
@@ -272,6 +282,8 @@ def main(argv: list[str] | None = None) -> int:
         train(args.force, args.epochs)
     elif args.cmd == "bench":
         return bench(args.rest)
+    elif args.cmd == "studio":
+        return studio(args.rest)
     elif args.cmd == "all":
         if not doctor():
             return 1

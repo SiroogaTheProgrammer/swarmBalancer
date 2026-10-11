@@ -81,10 +81,25 @@ Reports (`bench/report.py`) are metric x strategy tables; the baseline column is
 
 Preset files in `scenarios/` are plain Python (`SCENARIO = Scenario(...)`, or `SCENARIOS = [...]` for A/B variants) with an `if __name__ == "__main__": main(SCENARIO)` footer, so a preset is both the definition and the executable; `_bootstrap.py` makes `swarm` importable without installation. `python -m swarm.bench` discovers `scenarios/*.py` (skipping `_*`), runs them, writes `out/bench/<name>.{md,json}` and `suite.md`, and exits 1 if any `Check` fails.
 
+## Tracing, plugin tactics and brain packages
+
+* **Trace hook** (`sim/core.py`, `sim/trace.py`): `Simulator.tracer` is called as `tracer(now, kind, data)` from the channel (each unicast/broadcast with queue, airtime, arrival and loss), `Node.compute` (each CPU booking), membership (suspect/readmit with the observer), and the strategies (camera on/off, capture, inference, leader learns, rejects, role changes). The recorder only observes - no scheduling, no random draws - so `run_scenario(..., trace=True)` gives bit-identical metrics (tested). `TraceRecorder.to_dict()` rows are documented in `SCHEMA`; work booked before a kill is cut at the kill, as `Node.kill` discards it.
+* **Plugin tactics**: `sim.strategies.register_strategy(name, cls)` adds a `SwarmNode` subclass to `NODE_CLASSES` (built-in names are reserved; a name cannot be claimed by two sources). `Scenario` validation accepts registered names (`bench.scenario.known_strategies`), and `SwarmNode.camera_mode` (`"all"` / `"single"`) replaces the hard-coded "striped gets the striped fps" rule, so one-camera plugins are fed like `striped`.
+* **Brain packages**: `BrainSpec(kind="package", model=<package folder>)` (or `kind="auto"` with a folder) resolves through `swarm.sdk.packages.Package.resolve_brain` - a `.swm` package runs in the C++ engine or numpy like any model, a Python package through `PythonBrainAdapter` at its declared cost.
+
+## SDK (`python/swarm/sdk`)
+
+Packages are folders with `manifest.json` (`packages.py`); reading one never runs code, loading imports it under a private module namespace per package. `api.py` defines the `Tactic` base (a `SwarmNode` with documented helpers) and the optional `PerceptionBrain` base. `validate.py` is the conformance gate: perception brains are run on synthetic frames (validity, determinism, accuracy, device fit with the RAM cap enforced by the C++ engine), tactics are simulated (determinism, the *physics* invariant - at least brain + downscale MACs per processed frame -, leader and worker loss, the s11 yardstick). `install.py` installs uploads with bounded, path-checked archive extraction; `export.py` produces the device artefacts (`.swm` for the C++ engine, or a runtime factory around a numpy brain). Manual: [SDK.md](SDK.md).
+
+## Studio (`python/swarm/studio`)
+
+A standard-library `ThreadingHTTPServer` bound to 127.0.0.1 serves a WebGL single-page app (`static/`, no third-party code) and a JSON API guarded by a per-launch token plus Host/Origin checks. The server never imports package or preset code: `jobs.py` starts `python -m swarm.studio.worker` per job (simulate, validate, compile, index presets) with a timeout and cancellation. A simulation job runs `run_scenario(trace=True, keep_frames=True)` and stores `out/studio/runs/<id>/run.json` plus the captured frames; the browser turns each strategy's trace into time-indexed queries (`playback.js`) and draws the swarm on a deterministic, purely visual flight path (`kinematics.js`). `scenario_io.py` validates scenario JSON from the browser and writes runnable preset files (with a `THEATRE` dict the battery ignores). Guide: [STUDIO.md](STUDIO.md).
+
 ## Extending
 
 * **New layer**: add `LayerType` + `plan_layer/scratch_needs/forward` in `cpp/src/nn.cpp`, the parser case in `model.cpp`, the numpy class with `spec()` in `layers.py`, the encoder/decoder case in `formats.py`, a case in `Sequential.load`, and a test in `cpp/tests/test_nn.cpp`.
-* **New device**: add a `DeviceProfile` in `devices/profiles.py`. Calibrate `macs_per_cycle` by running `bench_matmul` on the real board.
-* **New strategy**: subclass `SwarmNode`, register in `NODE_CLASSES`, add to `COMPARE_SET` in `sim/run.py`.
+* **New device**: add a `DeviceProfile` in `devices/profiles.py`. Calibrate `macs_per_cycle` by running `bench_matmul` on the real board. Tag Linux-class companions `"linux"` (they can host Python brains).
+* **New strategy**: subclass `SwarmNode`, register in `NODE_CLASSES`, add to `COMPARE_SET` in `sim/run.py` - or ship it as an SDK tactic package (`python -m swarm.sdk new NAME --type tactic`) without touching the simulator.
+* **New perception brain**: an SDK package (`.swm` network or numpy class); `python -m swarm.sdk validate` checks it against every device profile.
 * **New sensor / member type** (satellite downlink, buggy, aircraft): a member is just a `DeviceProfile` + a `SwarmNode` subclass; satellites mostly differ in radio (`cubesat-obc`: 9600 bps, 10 ms) and in having no peers within range - model a ground station as the leader.
 * **Real hardware**: build `swarm_core` with the `target-generic` preset (or your board's toolchain file); `run_model` needs only the C++ standard library.
