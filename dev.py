@@ -6,8 +6,9 @@
     python dev.py test        ctest + pytest
     python dev.py train       train the tiny CNN -> models/*.swm (skipped if they exist; --force to retrain)
     python dev.py bench       the standardized scenario battery (reports in out/bench/)
-    python dev.py studio      the 3D studio (SWARM//OPS console) - extra arguments go to python -m swarm.studio
+    python dev.py studio      the drone test bench (SWARM//OPS) - extra arguments go to python -m swarm.studio
     python dev.py all         doctor, build, test, train, bench
+    python dev.py native-python   Windows on ARM: a native interpreter that arena training uses (~2x faster)
 
 Standard library only, so it runs before numpy/pytest are installed (it will offer
 to install them). Tools are located on PATH *or* where winget installs them, because
@@ -126,6 +127,10 @@ def doctor(quiet: bool = False) -> bool:
     if _arch.python_is_emulated():
         lines.append(f"note      : this python is an {py} build running emulated on an {machine} PC; ctypes can only "
                      f"load {py} DLLs, so `build` also cross-compiles one into build-{py}/ (automatic).")
+        if sys.platform == "win32" and machine == "arm64":
+            native = _arch.native_python()
+            lines.append("training  : " + (f"on the native {machine} python in {native.parent}" if native else
+                                           "on this emulated python, at about half speed -> python dev.py native-python"))
     if not quiet:
         print("\n".join(lines))
         if not ok:
@@ -240,6 +245,89 @@ def studio(args: list[str]) -> int:
     return run([sys.executable, "-m", "swarm.studio", *args], env=env, check=False)
 
 
+# ----------------------------------------------------------------------------- native interpreter (Windows on ARM)
+NUGET = "https://api.nuget.org/v3-flatcontainer/pythonarm64/"
+NUGET_REGISTRATION = "https://api.nuget.org/v3/registration5-semver1/pythonarm64/"
+
+
+def _get(url: str, timeout: float = 60.0) -> bytes:
+    import urllib.request
+
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return r.read()
+
+
+def _numpy_version() -> str | None:
+    from importlib import metadata
+
+    try:
+        return metadata.version("numpy")
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def native_python(force: bool = False) -> int:
+    """Sets up .native-python/: python.org's arm64 build of this Python version (its NuGet package, checked
+    against the SHA-512 NuGet publishes) with the same numpy. On Windows on ARM the usual Python is an x64
+    build running emulated; arena training then re-launches itself on this one, about twice as fast."""
+    import base64
+    import hashlib
+    import io
+    import json
+    import zipfile
+
+    machine = _arch.machine_arch()
+    if sys.platform != "win32" or machine != "arm64" or not _arch.python_is_emulated():
+        print("nothing to do: this python already runs natively on this machine")
+        return 0
+    target = ROOT / _arch.NATIVE_DIR
+    if _arch.native_python() and not force:
+        print(f"already set up in {target} (--force reinstalls it)")
+        return 0
+    want = f"{sys.version_info.major}.{sys.version_info.minor}"
+    versions = [v for v in json.loads(_get(NUGET + "index.json"))["versions"]
+                if v.startswith(want + ".") and all(p.isdigit() for p in v.split("."))]
+    if not versions:
+        sys.exit(f"python.org publishes no arm64 package of Python {want} on NuGet")
+    version = max(versions, key=lambda v: tuple(int(p) for p in v.split(".")))
+    entry = json.loads(_get(json.loads(_get(f"{NUGET_REGISTRATION}{version}.json"))["catalogEntry"]))
+    url = f"{NUGET}{version}/pythonarm64.{version}.nupkg"
+    print(f"downloading Python {version} arm64 ({entry.get('packageSize', 0) / 1e6:.0f} MB) from {url}", flush=True)
+    data = _get(url, timeout=600.0)
+    digest = base64.b64encode(hashlib.sha512(data).digest()).decode()
+    if entry.get("packageHashAlgorithm") != "SHA512" or digest != entry.get("packageHash"):
+        sys.exit("the download does not match the SHA-512 NuGet publishes for it - nothing installed")
+    tmp = target.with_name(target.name + ".tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        for info in z.infolist():
+            if not info.filename.startswith("tools/") or info.is_dir():
+                continue
+            dest = (tmp / info.filename[len("tools/"):]).resolve()
+            if tmp.resolve() not in dest.parents:
+                sys.exit(f"unexpected path in the package: {info.filename}")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(info) as src, open(dest, "wb") as out:
+                shutil.copyfileobj(src, out)
+    exe = tmp / "python.exe"
+    if _arch.dll_arch(exe) != machine:
+        sys.exit(f"{exe} is not an {machine} build - nothing installed")
+    env = {k: v for k, v in os.environ.items() if k.upper() not in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE")}
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    run([exe, "-m", "ensurepip", "--default-pip"], env=env)
+    numpy = _numpy_version()  # the same numpy as this python, so both run the same code
+    run([exe, "-m", "pip", "install", "--quiet", "--no-warn-script-location", "--only-binary=:all:",
+         f"numpy=={numpy}" if numpy else "numpy"], env=env)
+    shutil.rmtree(target, ignore_errors=True)
+    try:
+        tmp.rename(target)
+    except OSError as exc:
+        sys.exit(f"could not move {tmp.name} to {target.name} ({exc}); is a training still running on it?")
+    print(f"\nnative Python {version} {machine} ready in {target}\n`python -m swarm.arena train` and the studio's "
+          f"training now run on it (SWARM_NATIVE_PYTHON=off to opt out; delete the folder to remove it)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # Preserve all toolkit commands. Device tools are explicit, separate opt-ins,
     # passed through without loading a model, installing a driver or opening hardware.
@@ -263,10 +351,12 @@ def main(argv: list[str] | None = None) -> int:
     tr.add_argument("--epochs", type=int, default=3)
     be = sub.add_parser("bench", help="extra arguments are passed to `python -m swarm.bench`")
     be.add_argument("rest", nargs=argparse.REMAINDER)
-    st = sub.add_parser("studio", help="3D studio; extra arguments are passed to `python -m swarm.studio`")
+    st = sub.add_parser("studio", help="drone test bench; extra arguments are passed to `python -m swarm.studio`")
     st.add_argument("rest", nargs=argparse.REMAINDER)
     a = sub.add_parser("all")
     a.add_argument("--clean", action="store_true")
+    npy = sub.add_parser("native-python", help="Windows on ARM: a native interpreter for arena training (~2x faster)")
+    npy.add_argument("--force", action="store_true", help="reinstall it")
     for command, module in device_tools.items():
         sub.add_parser(command, help=f"device tool: python -m {module} (separate from the testing toolkit)")
     args = ap.parse_args(argv)
@@ -284,6 +374,8 @@ def main(argv: list[str] | None = None) -> int:
         return bench(args.rest)
     elif args.cmd == "studio":
         return studio(args.rest)
+    elif args.cmd == "native-python":
+        return native_python(args.force)
     elif args.cmd == "all":
         if not doctor():
             return 1

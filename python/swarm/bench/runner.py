@@ -20,14 +20,13 @@ import operator
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from swarm.brain import native
 from swarm.devices import DeviceProfile, get_profile
 from swarm.sim.brains import Brain, NativeBrain, NumpyBrain, OracleBrain
 from swarm.sim.core import Simulator
 from swarm.sim.strategies import NODE_CLASSES, SwarmConfig, build_swarm
-from swarm.sim.trace import TraceRecorder
 from swarm.train.dataset import FramePool, make_dataset
 
 from .scenario import Check, Faults, Scenario, split_strategy
@@ -46,7 +45,6 @@ class StrategyResult:
     metrics: dict
     log: list[str]
     twin_metrics: dict | None = None  # the same run without faults (only when the scenario has faults)
-    trace: Any = None                 # TraceRecorder of the faulted run, with run_scenario(trace=True)
 
 
 @dataclass
@@ -145,8 +143,7 @@ def resolve_brain(sc: Scenario, override: str | None = None) -> tuple[str, Path 
 # simulation
 # ----------------------------------------------------------------------------
 def simulate(sc: Scenario, strategy: str, brain: Brain, profiles: list[DeviceProfile], bps: float, latency: float,
-             faults: Faults, pool: FramePool | None, duration: float, verbose: bool = False,
-             tracer: Callable | None = None):
+             faults: Faults, pool: FramePool | None, duration: float, verbose: bool = False):
     strat, pre = split_strategy(strategy)
     single_camera = getattr(NODE_CLASSES.get(strat), "camera_mode", "all") == "single"
     fps = sc.striped_fps() if single_camera else sc.camera.fps
@@ -156,7 +153,6 @@ def simulate(sc: Scenario, strategy: str, brain: Brain, profiles: list[DevicePro
                       queue_limit=sc.queue_limit, p_object=sc.camera.p_object, frame_size=brain.input_shape[-1])
     sim = Simulator(sc.seed)
     sim.verbose = verbose
-    sim.tracer = tracer
     channel, nodes = build_swarm(sim, cfg, profiles, brain, bps, latency, sc.link.loss, sc.seed, pool, sc.link.qos)
 
     def kill(who) -> None:
@@ -287,13 +283,8 @@ def evaluate_checks(sc: Scenario, results: list[StrategyResult]) -> list[CheckRe
 # entry point
 # ----------------------------------------------------------------------------
 def run_scenario(sc: Scenario, *, brain_kind: str | None = None, duration: float | None = None,
-                 strategies: list[str] | None = None, with_stress: bool = True, verbose: bool = False,
-                 trace: bool = False, keep_frames: bool = False,
-                 progress: Callable[[str], None] | None = None) -> ScenarioResult:
-    """``trace=True`` records each strategy's timeline (``StrategyResult.trace``) for the 3D studio; the
-    recorder only observes, so metrics are identical with and without it. ``progress`` gets status lines."""
+                 strategies: list[str] | None = None, with_stress: bool = True, verbose: bool = False) -> ScenarioResult:
     t0 = time.perf_counter()
-    say = progress or (lambda _msg: None)
     duration = duration or sc.duration
     names = list(strategies) if strategies else list(sc.strategy_order())
     names = [sc.baseline] + [n for n in names if n != sc.baseline]  # the baseline is always simulated, first
@@ -327,20 +318,14 @@ def run_scenario(sc: Scenario, *, brain_kind: str | None = None, duration: float
     }
 
     results: list[StrategyResult] = []
-    for i, name in enumerate(names):
-        say(f"simulating {name} ({i + 1}/{len(names)})")
-        rec = TraceRecorder(keep_frames=keep_frames) if trace else None
-        sim, ch, nodes = simulate(sc, name, factory(), profiles, bps, latency, sc.faults, pool, duration, verbose,
-                                  tracer=rec)
+    for name in names:
+        sim, ch, nodes = simulate(sc, name, factory(), profiles, bps, latency, sc.faults, pool, duration, verbose)
         twin = None
         if sc.faults:
-            say(f"fault-free twin of {name}")
             tsim, tch, tnodes = simulate(sc, name, factory(), profiles, bps, latency, Faults(), pool, duration)
             twin = collect(tsim, tch, tnodes, duration, None)
-        results.append(StrategyResult(name, collect(sim, ch, nodes, duration, twin), sim.log_lines, twin, rec))
+        results.append(StrategyResult(name, collect(sim, ch, nodes, duration, twin), sim.log_lines, twin))
 
-    if with_stress:
-        say("device stress test")
     stress_rows = run_stress(sc, model_path, profiles, probe.macs, frame_size) if with_stress else []
     checks = evaluate_checks(sc, results)
     shown_path = None

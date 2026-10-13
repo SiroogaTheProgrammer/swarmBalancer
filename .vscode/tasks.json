@@ -6,7 +6,7 @@
   },
   "tasks": [
     {
-      "label": "studio: 3D tactical console",
+      "label": "studio: drone test bench",
       "type": "shell",
       "command": "python -m swarm.studio",
       "isBackground": true,

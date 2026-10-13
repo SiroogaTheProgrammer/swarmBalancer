@@ -1,9 +1,9 @@
 """The studio's local web server: static UI + JSON API, standard library only.
 
-    python -m swarm.studio            # opens the console in an app window (Edge/Chrome) or the default browser
+    python -m swarm.studio            # opens the test bench in an app window (Edge/Chrome) or the browser
     python -m swarm.studio --no-browser --port 8770
 
-Security model (the API can run code you uploaded, so it must not be reachable by anyone else):
+Security model (the API runs brains you uploaded, so it must not be reachable by anyone else):
 
 * binds to 127.0.0.1 only;
 * every /api call needs the per-launch session token (header ``X-Studio-Token``); the token reaches the
@@ -12,7 +12,7 @@ Security model (the API can run code you uploaded, so it must not be reachable b
   Origin, if sent, must be this server (defeats cross-site requests);
 * strict Content-Security-Policy, no framing, bounded request bodies, static files from one folder only.
 
-Package and preset code never runs in this process - worker jobs (``jobs.py``) do that.
+Brain code never runs in this process - worker jobs (``jobs.py``) do that.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import hmac
+import io
 import json
 import mimetypes
 import os
@@ -31,35 +32,36 @@ import sys
 import threading
 import time
 import webbrowser
-from base64 import b64encode
+import zipfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from swarm.sdk.export import export_for_device
-from swarm.sdk.install import LIBRARY, MAX_UPLOAD_BYTES, install_upload, remove_package
-from swarm.sdk.packages import PackageError
-from swarm.sdk.templates import KINDS, new_package
+from swarm._arch import native_python, python_is_emulated
+from swarm.arena.brains import DEFAULTS, BrainError, a_or_an, list_brains
+from swarm.arena.config import ClashConfig, ConfigError, ReconConfig, TrainConfig, from_dict, schema, to_dict
+from swarm.arena.run import TESTS
+from swarm.devices import DEVICE_PROFILES
+from swarm.sdk.install import JUNK, LIBRARY, MAX_UPLOAD_BYTES, install_npz, install_upload, remove_package, slug
+from swarm.sdk.packages import NAME_RE, PackageError, discover_packages
 
 from . import store
-from .catalog import Catalog
 from .jobs import JobManager
-from .scenario_io import MARKER, STUDIO_DIR, ScenarioError, normalize, normalize_theatre, save_preset
 
 STATIC = Path(__file__).resolve().parent / "static"
 REPO_ROOT = store.REPO_ROOT
-MAX_JSON_BYTES = 4 << 20
+MAX_JSON_BYTES = 1 << 20
 DOCS = {
-    "studio": ("Studio field guide", "docs/STUDIO.md"),
-    "sdk": ("SDK - brains & tactics", "docs/SDK.md"),
-    "architecture": ("Architecture", "docs/ARCHITECTURE.md"),
-    "model-format": (".swm model format", "docs/MODEL_FORMAT.md"),
-    "deployment": ("Deployment (USB)", "docs/DEPLOYMENT.md"),
-    "runtime": ("Device runtime", "docs/RUNTIME.md"),
-    "robot-adapters": ("Robot adapters", "docs/ROBOT_ADAPTERS.md"),
-    "security": ("Security model", "docs/SECURITY.md"),
+    "arena": ("Test bench manual", "docs/ARENA.md"),
+    "studio": ("Using the studio", "docs/STUDIO.md"),
+    "sdk": ("SDK - writing brains", "docs/SDK.md"),
     "readme": ("README", "README.md"),
+}
+TEST_INFO = {
+    "recon": "Survey an area: cover it fast, stay in radio contact, keep the sensing load low.",
+    "defence": "A wall of interceptors against an incoming swarm: stop them all, without piling onto one.",
+    "offence": "The incoming swarm's side: talk to each other and get past the wall.",
 }
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
        "connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
@@ -78,8 +80,6 @@ class Studio:
     def __init__(self, port: int):
         self.token = secrets.token_urlsafe(24)
         self.jobs = JobManager(max_parallel=max(2, min(4, (os.cpu_count() or 2) // 2)))
-        self.catalog = Catalog(self.jobs)
-        self.frames = store.FrameCache()
         self.httpd = _Server(("127.0.0.1", port), Handler)
         self.httpd.studio = self
         self.port = self.httpd.server_address[1]
@@ -106,10 +106,61 @@ class _Server(ThreadingHTTPServer):
 
 
 # ----------------------------------------------------------------------------
+# what the UI needs to build its forms (reads manifests and weight headers only - runs no brain code)
+# ----------------------------------------------------------------------------
+def catalog() -> dict:
+    return {
+        "tests": {name: {"title": spec["title"], "about": TEST_INFO[name], "sides": list(spec["sides"]),
+                         "subject": spec["subject"], "settings": schema(spec["config"])}
+                  for name, spec in TESTS.items()},
+        "train": schema(TrainConfig),
+        "cores": os.cpu_count() or 1,
+        # training speed: an emulated interpreter (x64 Python on an ARM64 PC) simulates at about half speed
+        "native": not python_is_emulated() or native_python() is not None,
+        "brains": list_brains(),
+        "defaults": DEFAULTS,
+        "devices": {n: p.description for n, p in DEVICE_PROFILES.items() if n != "host"},
+    }
+
+
+def _library_package(name: str):
+    if not NAME_RE.match(name or ""):
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"invalid brain name {name!r}")
+    for _folder, pkg, _err in discover_packages():
+        if pkg is not None and pkg.name == name:
+            return pkg
+    raise ApiError(HTTPStatus.NOT_FOUND, f"no brain package {name!r} in the library")
+
+
+def _zip_package(pkg) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for rel, _size in pkg.files():
+            if any(p in JUNK for p in rel.split("/")) or rel.endswith(".pyc"):
+                continue
+            zf.write(pkg.root / rel, rel)
+    return buf.getvalue()
+
+
+def _check_brains(test: str, brains: dict) -> dict:
+    """Brain ids must exist (checked against the list, nothing is loaded here)."""
+    known = {b["id"]: b for b in list_brains() if b.get("kind") != "broken"}
+    out = {}
+    for role in TESTS[test]["sides"]:
+        bid = brains.get(role) or DEFAULTS[role]
+        if not isinstance(bid, str) or bid not in known:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"unknown {role} brain {bid!r}")
+        if known[bid]["role"] != role:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"{bid} is {a_or_an(known[bid]['role'])} brain, not {a_or_an(role)} brain")
+        out[role] = bid
+    return out
+
+
+# ----------------------------------------------------------------------------
 # request handling
 # ----------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SwarmStudio/1.0"
+    server_version = "SwarmStudio/2.0"
     sys_version = ""
     protocol_version = "HTTP/1.1"
     server: _Server
@@ -137,20 +188,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
 
-    def _send_bytes(self, status: int, body: bytes, ctype: str, cache: str = "no-store") -> None:
-        extra = {"Cache-Control": cache}
+    def _send_bytes(self, status: int, body: bytes, ctype: str, cache: str = "no-store",
+                    extra: dict | None = None) -> None:
+        hdr = {"Cache-Control": cache, **(extra or {})}
         if len(body) > 32 * 1024 and "gzip" in self.headers.get("Accept-Encoding", "") and \
-                not ctype.startswith(("image/", "application/octet-stream")):
+                not ctype.startswith(("image/", "application/zip", "application/octet-stream")):
             body = gzip.compress(body, compresslevel=5)
-            extra["Content-Encoding"] = "gzip"
-            extra["Vary"] = "Accept-Encoding"
-        self._headers(status, ctype, len(body), extra)
+            hdr["Content-Encoding"] = "gzip"
+            hdr["Vary"] = "Accept-Encoding"
+        self._headers(status, ctype, len(body), hdr)
         if self.command != "HEAD":
             self.wfile.write(body)
 
     def _json(self, obj, status: int = 200) -> None:
         body = json.dumps(obj, separators=(",", ":"), allow_nan=False, default=str).encode("utf-8")
         self._send_bytes(status, body, "application/json; charset=utf-8")
+
+    def _json_file(self, path: Path) -> None:
+        self._send_bytes(200, path.read_bytes(), "application/json; charset=utf-8")
 
     def _error(self, status: int, message: str) -> None:
         self._json({"error": message}, status)
@@ -218,7 +273,7 @@ class Handler(BaseHTTPRequestHandler):
         except ApiError as exc:
             self.close_connection = True  # the body may not have been read
             self._error(exc.status, str(exc))
-        except (ScenarioError, PackageError, KeyError, ValueError, TypeError) as exc:
+        except (ConfigError, BrainError, PackageError, KeyError, ValueError, TypeError) as exc:
             msg = exc.args[0] if isinstance(exc, KeyError) and exc.args else str(exc)
             self._error(HTTPStatus.BAD_REQUEST, str(msg))
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -249,137 +304,118 @@ class Handler(BaseHTTPRequestHandler):
     # -------------------------------------------------------------- api
     def _api(self, method: str, route: str, q: dict) -> None:
         st = self.studio
-        parts = route.strip("/").split("/")
-        head = parts[0]
+        parts = [p for p in route.strip("/").split("/") if p]
+        head = parts[0] if parts else ""
+        n = len(parts)
 
         if (method, route) == ("GET", "catalog"):
-            return self._json(st.catalog.build())
+            return self._json(catalog())
         if (method, route) == ("GET", "ping"):
-            return self._json({"ok": True, "uptime": time.time() - st.started})
+            return self._json({"ok": True, "uptime": time.time() - st.started,
+                               "jobs": [j.view(log_tail=0) | {"events": []} for j in st.jobs.active()]})
         if (method, route) == ("POST", "shutdown"):
             self._json({"ok": True})
             st.stop()
             return None
 
-        # ---------------- scenarios
-        if (method, route) == ("POST", "scenario/check"):
+        # ---------------- tests
+        if (method, route) == ("POST", "test"):
             body = self._read_json()
-            plain = normalize(body.get("scenario"), self._plugin_names())
-            return self._json({"scenario": plain, "theatre": normalize_theatre(body.get("theatre"))})
-        if (method, route) == ("POST", "scenario/save"):
-            body = self._read_json()
-            plain = normalize(body.get("scenario"), self._plugin_names())
-            theatre = normalize_theatre(body.get("theatre"))
-            packages = self._tactic_packages(plain)
-            path = save_preset(plain, theatre, packages, where=body.get("where", "studio"),
-                               overwrite=bool(body.get("overwrite")))
-            st.catalog.invalidate_presets()
-            return self._json({"file": path.relative_to(REPO_ROOT).as_posix()})
-        if (method, route) == ("POST", "scenario/delete"):
-            body = self._read_json()
-            target = (REPO_ROOT / str(body.get("file", ""))).resolve()
-            if target.parent != STUDIO_DIR.resolve() or target.suffix != ".py" or not target.is_file() or \
-                    MARKER not in target.read_text(encoding="utf-8", errors="replace"):
-                raise ApiError(HTTPStatus.BAD_REQUEST, "only studio-created presets in scenarios/studio/ can be deleted")
-            target.unlink()
-            st.catalog.invalidate_presets()
-            return self._json({"deleted": body.get("file")})
+            test = body.get("test")
+            if test not in TESTS:
+                raise ApiError(HTTPStatus.BAD_REQUEST, f"test must be one of {list(TESTS)}")
+            cfg = from_dict(TESTS[test]["config"], body.get("settings"))
+            brains = _check_brains(test, body.get("brains") or {})
+            episodes, seed = body.get("episodes", 8), body.get("seed", 0)
+            if not isinstance(episodes, int) or not 1 <= episodes <= 64:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "episodes must be a whole number from 1 to 64")
+            if not isinstance(seed, int) or not 0 <= seed < 2**31:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "seed must be a whole number from 0")
+            spec = {"test": test, "settings": to_dict(cfg), "brains": brains, "episodes": episodes, "seed": seed,
+                    "compare": bool(body.get("compare", True))}
+            job = st.jobs.submit("test", spec, label=f"{TESTS[test]['title']} test", meta={"test": test})
+            return self._json({"job": job.id})
 
-        # ---------------- runs
+        # ---------------- saved test reports
         if head == "runs":
-            if method == "POST" and len(parts) == 1:
-                body = self._read_json()
-                plain = normalize(body.get("scenario"), self._plugin_names())
-                theatre = normalize_theatre(body.get("theatre"))
-                packages = self._tactic_packages(plain)
-                strategies = body.get("strategies") or None
-                brain_kind = body.get("brain_kind") or None
-                if brain_kind not in (None, "auto", "oracle", "numpy", "native"):
-                    raise ApiError(HTTPStatus.BAD_REQUEST, "brain_kind must be auto, oracle, numpy or native")
-                run_id = store.new_id()
-                spec = {"scenario": plain, "theatre": theatre, "packages": packages, "strategies": strategies,
-                        "brain_kind": brain_kind, "with_stress": bool(body.get("with_stress", False)),
-                        "run_dir": str(store.RUNS / run_id), "preset": body.get("preset")}
-                job = st.jobs.submit("run", spec, label=f"simulate {plain['name']}")
-                return self._json({"job": job.id, "run": run_id})
-            if method == "GET" and len(parts) == 1:
+            if method == "GET" and n == 1:
                 return self._json({"runs": store.list_runs()})
-            run_id = parts[1]
-            if method == "GET" and len(parts) == 2:
-                d = store.run_dir(run_id)
-                return self._send_bytes(200, (d / "run.json").read_bytes(), "application/json; charset=utf-8")
-            if method == "DELETE" and len(parts) == 2:
-                st.frames.forget(run_id)
-                store.delete_run(run_id)
-                return self._json({"deleted": run_id})
-            if method == "GET" and len(parts) == 3 and parts[2] == "frame":
-                img = st.frames.frame(run_id, int(q.get("s", ["0"])[0]), int(q.get("fid", ["-1"])[0]))
-                if img is None:
-                    raise ApiError(HTTPStatus.NOT_FOUND, "frame not recorded")
-                return self._json({"w": int(img.shape[1]), "h": int(img.shape[0]),
-                                   "data": b64encode(img.tobytes()).decode("ascii")})
+            if method == "GET" and n == 2:
+                return self._json_file(store.run_file(parts[1]))
+            if method == "DELETE" and n == 2:
+                store.delete_run(parts[1])
+                return self._json({"deleted": parts[1]})
+
+        # ---------------- training
+        if (method, route) == ("POST", "train"):
+            return self._start_training(self._read_json())
+        if head == "training":
+            if method == "GET" and n == 1:
+                return self._json({"training": store.list_trainings()})
+            tid = parts[1] if n > 1 else ""
+            if method == "GET" and n == 2:
+                d = store.training_dir(tid)
+                hist = d / "history.json"
+                history = json.loads(hist.read_text(encoding="utf-8")) if hist.is_file() else {}
+                return self._json({"status": store.training_status(tid), "history": history.get("history", [])})
+            if method == "GET" and n == 4 and parts[2] == "matches":
+                return self._json_file(store.match_file(tid, parts[3]))
+            if method == "POST" and n == 3 and parts[2] == "save":
+                return self._save_trained(tid, self._read_json())
+            if method == "DELETE" and n == 2:
+                status = store.training_status(tid)
+                if status.get("state") in ("queued", "running"):
+                    raise ApiError(HTTPStatus.CONFLICT, "stop the training before deleting it")
+                store.delete_training(tid)
+                return self._json({"deleted": tid})
 
         # ---------------- jobs
-        if head == "jobs" and len(parts) >= 2:
+        if head == "jobs" and n >= 2:
             job = st.jobs.get(parts[1])
-            if method == "GET" and len(parts) == 2:
-                return self._json(job.view())
-            if method == "POST" and len(parts) == 3 and parts[2] == "cancel":
-                return self._json(st.jobs.cancel(job.id).view())
+            if method == "GET" and n == 2:
+                return self._json(job.view(since=int(q.get("since", ["0"])[0] or 0)))
+            if method == "POST" and n == 3 and parts[2] == "cancel":
+                return self._json(st.jobs.cancel(job.id).view(since=len(job.events)))
+            if method == "POST" and n == 3 and parts[2] == "stop":
+                return self._json(st.jobs.stop(job.id).view(since=len(job.events)))
 
-        # ---------------- packages
-        if head == "packages":
-            sub = parts[1] if len(parts) > 1 else ""
-            if method == "POST" and sub == "upload":
-                name = q.get("filename", [""])[0]
-                if not re.fullmatch(r"[\w .()-]{1,120}\.(zip|swm|py)", name, flags=re.IGNORECASE):
-                    raise ApiError(HTTPStatus.BAD_REQUEST, "filename must end in .zip, .swm or .py")
-                data = self._read_body(MAX_UPLOAD_BYTES)
-                pkg = install_upload(data, name, LIBRARY, replace=q.get("replace", ["0"])[0] == "1")
-                job = st.catalog.validate(pkg)
-                return self._json({"package": pkg.summary() | {"root": None}, "job": job.id})
-            if method == "POST" and sub == "new":
-                body = self._read_json()
-                if body.get("type") not in KINDS:
-                    raise ApiError(HTTPStatus.BAD_REQUEST, f"type must be one of {KINDS}")
-                root = new_package(LIBRARY, str(body.get("name", "")), body["type"], str(body.get("title", ""))[:80])
-                pkg = st.catalog.package(root.relative_to(REPO_ROOT).as_posix())
-                job = st.catalog.validate(pkg) if pkg.format != "swm" else None
-                return self._json({"package": pkg.summary() | {"root": None}, "job": job.id if job else None})
-            if method == "POST" and sub in ("validate", "build", "export", "delete"):
-                body = self._read_json()
-                pkg = st.catalog.package(str(body.get("path", "")))
-                if sub == "validate":
-                    return self._json({"job": st.catalog.validate(pkg).id})
-                if sub == "build":
-                    if not pkg.manifest.get("build"):
-                        raise ApiError(HTTPStatus.BAD_REQUEST, f"{pkg.name} has no build script")
-                    return self._json({"job": st.catalog.validate(pkg, build=True).id})
-                if sub == "export":
-                    out = store.EXPORTS / f"{pkg.name}-{store.new_id()}"
-                    res = export_for_device(pkg.root, out)
-                    res["out_rel"] = Path(res["out"]).relative_to(REPO_ROOT).as_posix()
-                    return self._json(res)
+        # ---------------- brains (library)
+        if head == "brains":
+            if method == "GET" and n == 1:
+                return self._json({"brains": list_brains()})
+            if method == "POST" and n == 2 and parts[1] == "upload":
+                return self._upload(q)
+            name = parts[1] if n > 1 else ""
+            if method == "DELETE" and n == 2:
+                pkg = _library_package(name)
                 if pkg.root.parent.resolve() != LIBRARY.resolve():
-                    raise ApiError(HTTPStatus.BAD_REQUEST, "examples are part of the repository; only uploaded or "
-                                                           "created packages (brains/) can be deleted")
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "example brains are part of the repository; only "
+                                                           "uploaded or saved brains (brains/) can be deleted")
                 remove_package(pkg.name, LIBRARY)
                 return self._json({"deleted": pkg.name})
-            if method == "GET" and sub == "source":
-                pkg = st.catalog.package(q.get("path", [""])[0])
-                rel = q.get("file", [""])[0]
-                target = (pkg.root / rel).resolve()
-                if pkg.root.resolve() not in target.parents or not target.is_file():
-                    raise ApiError(HTTPStatus.NOT_FOUND, "no such file in the package")
-                if target.suffix.lower() not in (".py", ".json", ".md", ".txt", ".toml", ".cfg"):
-                    raise ApiError(HTTPStatus.BAD_REQUEST, "only text sources can be viewed")
-                if target.stat().st_size > 512 * 1024:
-                    raise ApiError(HTTPStatus.BAD_REQUEST, "file too large to view")
-                return self._json({"file": rel, "text": target.read_text(encoding="utf-8", errors="replace")})
+            if method == "GET" and n == 3 and parts[2] == "download":
+                pkg = _library_package(name)
+                return self._send_bytes(200, _zip_package(pkg), "application/zip",
+                                        extra={"Content-Disposition": f'attachment; filename="{pkg.name}.zip"'})
+            if method == "POST" and n == 3 and parts[2] == "validate":
+                pkg = _library_package(name)
+                job = st.jobs.submit("validate", {"path": str(pkg.root)}, label=f"validate {pkg.name}",
+                                     meta={"brain": pkg.name})
+                return self._json({"job": job.id})
+            if method == "GET" and n == 3 and parts[2] == "source":
+                pkg = _library_package(name)
+                entry = pkg.entry.split(":")[0] if pkg.entry else None
+                if not entry:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, f"{pkg.name} is a trained network, not source code")
+                target = (pkg.root / entry).resolve()
+                if pkg.root.resolve() not in target.parents or not target.is_file() or \
+                        target.stat().st_size > 512 * 1024:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "source not available")
+                return self._json({"file": entry, "text": target.read_text(encoding="utf-8", errors="replace")})
 
         # ---------------- docs
         if head == "docs" and method == "GET":
-            if len(parts) == 1:
+            if n == 1:
                 return self._json({"docs": [{"id": k, "title": v[0], "path": v[1]} for k, v in DOCS.items()
                                             if (REPO_ROOT / v[1]).is_file()]})
             entry = DOCS.get(parts[1])
@@ -390,18 +426,74 @@ class Handler(BaseHTTPRequestHandler):
 
         raise ApiError(HTTPStatus.NOT_FOUND, f"no API route {method} /api/{route}")
 
-    # -------------------------------------------------------------- helpers
-    def _plugin_names(self) -> set[str]:
-        return {s["strategy"] for s in self.studio.catalog.packages() if s.get("type") == "tactic" and s.get("strategy")}
+    # -------------------------------------------------------------- actions
+    def _start_training(self, body: dict) -> None:
+        tc = from_dict(TrainConfig, body.get("train"))
+        cfg = from_dict(ReconConfig if tc.mode == "recon" else ClashConfig, body.get("settings"))
+        known = {b["id"]: b for b in list_brains() if b.get("kind") != "broken"}
+        for role, spec in (("defender", tc.start_defender), ("attacker", tc.start_attacker), ("recon", tc.start_recon)):
+            if spec != "fresh" and (spec not in known or known[spec]["role"] != role):
+                raise ApiError(HTTPStatus.BAD_REQUEST, f"unknown {role} brain {spec!r} to start from")
+        tid, out = store.new_training()
+        status = {"id": tid, "created": time.time(), "mode": tc.mode, "state": "queued", "generation": 0,
+                  "generations": tc.generations, "train": to_dict(tc), "settings": to_dict(cfg)}
+        spec = {"train": to_dict(tc), "settings": to_dict(cfg), "out_dir": str(out), "status": status}
 
-    def _tactic_packages(self, plain: dict) -> list[str]:
-        """Packages providing the plugin tactics a scenario names (looked up in the library, never trusted)."""
-        by_strategy = {s["strategy"]: s["root_rel"] for s in self.studio.catalog.packages()
-                       if s.get("type") == "tactic" and s.get("strategy")}
-        needed = sorted({by_strategy[s] for s in plain["strategies"] + [plain["baseline"]] if s in by_strategy})
-        if plain["brain"]["kind"] == "package":
-            self.studio.catalog.package(plain["brain"]["model"])  # must be a library package
-        return needed
+        def done(job) -> None:
+            path = out / "status.json"
+            try:
+                cur = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                cur = dict(status)
+            if cur.get("state") in ("queued", "running"):
+                cur.update(state="cancelled" if job.state == "cancelled" else "error", error=job.error,
+                           finished=time.time())
+                store.write_json(path, cur)
+
+        label = "train recon swarm" if tc.mode == "recon" else "train both swarms" if (
+            tc.learn_defenders and tc.learn_attackers) else "train defenders" if tc.learn_defenders else "train attackers"
+        job = self.studio.jobs.submit("train", spec, label=label, on_done=done, meta={"training": tid})
+        status["job"] = job.id
+        store.write_json(out / "status.json", status)
+        return self._json({"job": job.id, "training": tid})
+
+    def _save_trained(self, tid: str, body: dict) -> None:
+        role = body.get("role")
+        if role not in ("defender", "attacker", "recon"):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "role must be defender, attacker or recon")
+        which = body.get("which", "latest")
+        if which not in ("latest", "best"):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "which must be 'latest' or 'best'")
+        src = store.training_dir(tid) / (f"{role}.npz" if which == "latest" else f"{role}_best.npz")
+        if not src.is_file():
+            raise ApiError(HTTPStatus.NOT_FOUND, f"this training has no {which} {role} brain (yet)")
+        name = slug(str(body.get("name") or f"{role}_{tid[-4:]}"), "brain")
+        if not NAME_RE.match(name):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "name must start with a letter: letters, digits and _")
+        if any(pkg is not None and pkg.name == name for _f, pkg, _e in discover_packages()):
+            raise ApiError(HTTPStatus.CONFLICT, f"a brain called {name!r} already exists - pick another name")
+        title = str(body.get("title") or "").strip()[:60] or None
+        pkg = install_npz(src.read_bytes(), f"{name}.npz", LIBRARY, name=name, title=title)
+        return self._json({"brain": pkg.policy_info()})
+
+    def _upload(self, q: dict) -> None:
+        name = q.get("filename", [""])[0]
+        if not re.fullmatch(r"[\w .()-]{1,120}\.(zip|npz|py)", name, flags=re.IGNORECASE):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "upload a brain package (.zip), trained weights (.npz) or one .py")
+        data = self._read_body(MAX_UPLOAD_BYTES)
+        stem = slug(Path(name).stem, "brain")
+        taken = {pkg.name for _f, pkg, _e in discover_packages() if pkg is not None}
+        if Path(name).suffix.lower() in (".npz",) and stem in taken:
+            raise ApiError(HTTPStatus.CONFLICT, f"a brain called {stem!r} already exists - rename the file")
+        pkg = install_upload(data, name, LIBRARY)
+        if pkg.type != "policy":
+            remove_package(pkg.name, LIBRARY)
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"that is {a_or_an(pkg.type)} package; the test bench loads arena brains "
+                                                   "(a class with act(obs) and role = 'defender' / 'attacker' / "
+                                                   "'recon', or trained .npz weights) - see the SDK guide")
+        job = self.studio.jobs.submit("validate", {"path": str(pkg.root)}, label=f"validate {pkg.name}",
+                                      meta={"brain": pkg.name})
+        return self._json({"brain": pkg.policy_info(), "job": job.id})
 
 
 # ----------------------------------------------------------------------------
@@ -446,7 +538,7 @@ def open_ui(url: str, app: bool = True) -> str:
     exe = find_app_browser() if app else None
     if exe:
         try:
-            subprocess.Popen([exe, f"--app={url}", "--window-size=1680,1000", "--new-window"],
+            subprocess.Popen([exe, f"--app={url}", "--window-size=1600,960", "--new-window"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return f"app window ({Path(exe).stem})"
         except OSError:
@@ -459,7 +551,7 @@ BANNER = r"""
   ____  _      __ ___    ___   __  ___      ____   ___   ____
  / __/ | | /| / // _ |  / _ \ /  |/  /     / __ \ / _ \ / __/
 _\ \   | |/ |/ // __ | / , _// /|_/ /     / /_/ // ___/_\ \
-/___/  |__/|__//_/ |_|/_/|_|/_/  /_/      \____//_/   /___/   tactical swarm simulation console
+/___/  |__/|__//_/ |_|/_/|_|/_/  /_/      \____//_/   /___/   drone swarm test bench
 """
 
 
@@ -477,12 +569,11 @@ def main(argv: list[str] | None = None) -> int:
             raise
         studio = Studio(0)  # the preferred port is taken (another studio?) - any free one will do
     print(BANNER)
-    print(f"  engine : {studio.catalog.engine['diagnosis'].splitlines()[0]}")
-    print(f"  console: {studio.url}")
-    print("           (local only; the link carries this session's access token - do not share it)")
+    print(f"  test bench: {studio.url}")
+    print("              (local only; the link carries this session's access token - do not share it)")
     if not args.no_browser:
-        print(f"  opened : {open_ui(studio.url, app=not args.browser)}")
-    print("  Ctrl+C here (or SHUTDOWN in the console menu) stops the studio and its jobs.\n")
+        print(f"  opened    : {open_ui(studio.url, app=not args.browser)}")
+    print("  Ctrl+C here (or the power button in the bench) stops the studio and its jobs.\n")
     sys.stdout.flush()
     try:
         studio.serve()

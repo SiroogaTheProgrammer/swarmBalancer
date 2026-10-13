@@ -6,13 +6,14 @@
       "schema": "swarm.package/1",
       "name": "edge_detector",           lower-case identifier, unique in the library
       "version": "1.0.0",
-      "type": "perception",              perception | tactic
-      "format": "python",                perception only: python | swm
-      "entry": "brain.py:EdgeBrain",     python brains and tactics: <file inside the package>:<class>
-      "model": "model.swm",              swm brains: the compiled network
+      "type": "perception",              perception | tactic | policy
+      "format": "python",                perception: python | swm;  policy: npz | python
+      "role": "defender",                policy only: recon | defender | attacker (an arena test side)
+      "entry": "brain.py:EdgeBrain",     python brains, policies and tactics: <file inside the package>:<class>
+      "model": "model.swm",              swm brains: the compiled network; npz policies: the mesh weights
       "build": "train.py",               swm brains, optional: script that (re)compiles the model
       "classes": ["nothing", ...],       optional label names (swm files store only the class count)
-      "options": {},                     optional constructor options of a python brain
+      "options": {},                     optional constructor options of a python brain or policy
       "title": "...", "description": "...", "author": "..."
     }
 
@@ -26,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import re
 import sys
 import types
@@ -37,9 +39,12 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 MANIFEST = "manifest.json"
 SCHEMA = "swarm.package/1"
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
-TYPES = ("perception", "tactic")
+TYPES = ("perception", "tactic", "policy")
 FORMATS = ("python", "swm")
-LIBRARY_DIRS = (REPO_ROOT / "brains", REPO_ROOT / "examples" / "brains")
+POLICY_FORMATS = ("npz", "python")
+POLICY_ROLES = ("recon", "defender", "attacker")
+# your packages (SWARM_LIBRARY overrides, e.g. for tests), then the shipped examples
+LIBRARY_DIRS = (Path(os.environ.get("SWARM_LIBRARY") or REPO_ROOT / "brains"), REPO_ROOT / "examples" / "brains")
 MAX_MANIFEST_BYTES = 64 * 1024
 
 
@@ -103,6 +108,23 @@ def check_manifest(m: dict, root: Path) -> None:
             raise PackageError("classes must be a list of at least two non-empty label strings")
         if "options" in m and not isinstance(m["options"], dict):
             raise PackageError("options must be a JSON object")
+    if kind == "policy":
+        if m.get("role") not in POLICY_ROLES:
+            raise PackageError(f"policy packages need role {POLICY_ROLES}, got {m.get('role')!r}")
+        fmt = m.get("format")
+        if fmt not in POLICY_FORMATS:
+            raise PackageError(f"policy packages need format {POLICY_FORMATS}, got {fmt!r}")
+        if fmt == "npz":
+            model = m.get("model", "")
+            if not isinstance(model, str) or not model.endswith(".npz"):
+                raise PackageError(f"model must name the .npz weights inside the package, got {model!r}")
+            _inside(root, model, "model")
+        if "options" in m and not isinstance(m["options"], dict):
+            raise PackageError("options must be a JSON object")
+        if "macs" in m and (isinstance(m["macs"], bool) or not isinstance(m["macs"], int) or m["macs"] < 0):
+            raise PackageError("macs must be a whole number >= 0 (compute per drone per decision)")
+        if "comms" in m and not isinstance(m["comms"], bool):
+            raise PackageError("comms must be true or false")
     if kind == "tactic" or m.get("format") == "python":
         entry = m.get("entry")
         if not isinstance(entry, str) or entry.count(":") != 1:
@@ -147,7 +169,11 @@ class Package:
 
     @property
     def format(self) -> str | None:
-        return self.manifest.get("format") if self.type == "perception" else "python"
+        return self.manifest.get("format") if self.type in ("perception", "policy") else "python"
+
+    @property
+    def role(self) -> str | None:
+        return self.manifest.get("role") if self.type == "policy" else None
 
     @property
     def title(self) -> str:
@@ -163,7 +189,7 @@ class Package:
 
     @property
     def model_path(self) -> Path | None:
-        if self.format != "swm":
+        if self.format not in ("swm", "npz"):
             return None
         return _inside(self.root, self.manifest["model"], "model")
 
@@ -199,7 +225,70 @@ class Package:
             names = self.manifest.get("classes")
             if names:
                 info["classes"] = names
+        if self.type == "policy":
+            info.update(self.policy_info())
         return info
+
+    def policy_info(self) -> dict[str, Any]:
+        """What the arena brain list shows for a policy package; reads the .npz header, runs no code."""
+        info: dict[str, Any] = {
+            "id": f"lib:{self.name}", "name": self.name, "role": self.role,
+            "kind": "neural" if self.format == "npz" else "python", "title": self.title,
+            "summary": self.manifest.get("description", ""), "version": self.version,
+            "author": self.manifest.get("author", ""),
+            "comms": bool(self.manifest.get("comms", self.format == "npz")),
+            "macs": int(self.manifest.get("macs", 0) or 0), "package": str(self.root),
+            "removable": self.root.parent.resolve() == LIBRARY_DIRS[0].resolve(),
+        }
+        if self.format == "npz":
+            path = self.model_path
+            if path is None or not path.is_file():
+                info["error"] = f"weights {self.manifest.get('model')!r} missing"
+                return info
+            try:
+                import numpy as np
+
+                with np.load(path, allow_pickle=False) as z:
+                    meta = json.loads(str(z["meta"]))
+                n_in, hidden, n_out = int(meta["n_in"]), int(meta["hidden"]), int(meta["n_out"])
+                from swarm.arena.brains import OBS, OLD_DEFENDER, OUTPUTS, ROWS
+
+                if self.role == "defender" and (n_in, n_out) == OLD_DEFENDER:   # widened when it loads
+                    n_in, n_out = OBS["defender"].FEATURES, OUTPUTS["defender"]
+                rows = ROWS.get(self.role, 1)
+                info.update({"macs": rows * (n_in * hidden + hidden * n_out), "hidden": hidden,
+                             "params": n_in * hidden + hidden + hidden * n_out + n_out,
+                             "trained": {k: meta[k] for k in ("generations", "trained_against", "seconds")
+                                         if k in meta}})
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                info["error"] = f"unreadable weights ({exc})"
+        return info
+
+    def make_policy(self):
+        """The arena brain of a policy package (runs package code for python policies)."""
+        if self.type != "policy":
+            raise PackageError(f"{self.name} is a {self.type} package, not an arena policy")
+        from swarm.arena.brains import BrainError, NeuralBrain, PythonBrain
+
+        try:
+            if self.format == "npz":
+                path = self.model_path
+                if path is None or not path.is_file():
+                    raise PackageError(f"{self.name}: weights {self.manifest.get('model')!r} missing")
+                brain = NeuralBrain.load(path, name=self.name)
+                if brain.role != self.role:
+                    raise PackageError(f"{self.name}: the weights are for a {brain.role}, the manifest says {self.role}")
+                brain.title = self.title
+                brain.summary = self.manifest.get("description") or brain.summary
+            else:
+                cls = self.load_class()
+                options = dict(self.manifest.get("options") or {})
+                brain = PythonBrain(cls(**options), self.role, self.name, self.title,
+                                    self.manifest.get("description", ""))
+        except BrainError as exc:
+            raise PackageError(str(exc)) from None
+        brain.lib_id = f"lib:{self.name}"
+        return brain
 
     # ------------------------------------------------------------ code (trusted, runs the package)
     def module_name(self) -> str:
@@ -324,10 +413,10 @@ def use_package(path: str | Path) -> Package:
     return pkg
 
 
-def discover_packages(dirs: tuple[Path, ...] = LIBRARY_DIRS) -> list[tuple[Path, Package | None, str]]:
+def discover_packages(dirs: tuple[Path, ...] | None = None) -> list[tuple[Path, Package | None, str]]:
     """Every ``<dir>/<pkg>/manifest.json``: ``(folder, package or None, error)``. Runs no package code."""
     found = []
-    for d in dirs:
+    for d in LIBRARY_DIRS if dirs is None else dirs:
         if not d.is_dir():
             continue
         for child in sorted(d.iterdir()):

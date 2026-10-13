@@ -1,8 +1,9 @@
 """Command line for the SDK: new | validate | pack | install | export | list.
 
     python -m swarm.sdk new my_tactic --type tactic             # -> brains/my_tactic/
+    python -m swarm.sdk new my_wall --type policy-defender      # an arena brain for the DEFENCE test
     python -m swarm.sdk validate brains/my_tactic               # exit 1 if any check fails
-    python -m swarm.sdk pack brains/my_tactic -o my_tactic.zip  # for the studio's ARMORY upload
+    python -m swarm.sdk pack brains/my_tactic -o my_tactic.zip  # for the studio's LOAD BRAIN button
     python -m swarm.sdk install my_tactic.zip                   # same as uploading it in the studio
     python -m swarm.sdk export brains/my_brain --out deploy/my_brain
     python -m swarm.sdk list
@@ -37,10 +38,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("pack", help="zip a package for upload")
     p.add_argument("path", type=Path)
     p.add_argument("-o", "--out", type=Path, default=None)
-    i = sub.add_parser("install", help="install a .zip / .swm / .py / folder into brains/")
+    i = sub.add_parser("install", help="install a .zip / .npz / .swm / .py / folder into brains/")
     i.add_argument("source", type=Path)
     i.add_argument("--replace", action="store_true")
-    e = sub.add_parser("export", help="device artefacts for a perception brain")
+    e = sub.add_parser("export", help="device artefacts for a perception brain or a mesh policy")
     e.add_argument("path", type=Path)
     e.add_argument("--out", type=Path, required=True, help="new (or empty) folder")
     e.add_argument("--target", default="linux-aarch64")
@@ -53,6 +54,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"created {root}")
             if args.type == "perception-swm":
                 print(f"next: python {root / 'train.py'}   (compiles model.swm), then validate")
+            elif args.type.startswith("policy-"):
+                print(f"next: edit {root / 'policy.py'}, then python -m swarm.sdk validate {root}"
+                      " (it then appears in the studio's brain lists)")
             else:
                 print(f"next: edit it, then python -m swarm.sdk validate {root}")
             return 0
@@ -82,7 +86,12 @@ def main(argv: list[str] | None = None) -> int:
                 if pkg is None:
                     print(f"BROKEN      {folder}: {err}")
                     continue
-                what = pkg.type + (f"/{pkg.format}" if pkg.type == "perception" else f" -> strategy {pkg.strategy}")
+                if pkg.type == "perception":
+                    what = f"perception/{pkg.format}"
+                elif pkg.type == "policy":
+                    what = f"policy/{pkg.format} ({pkg.role})"
+                else:
+                    what = f"tactic -> strategy {pkg.strategy}"
                 print(f"{pkg.label():<28} {what:<34} {folder}")
             return 0
     except (PackageError, OSError) as exc:

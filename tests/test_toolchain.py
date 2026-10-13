@@ -41,6 +41,31 @@ def test_native_loader_never_picks_a_foreign_arch_dll():
         assert "python dev.py build" in native.diagnosis()
 
 
+def test_training_finds_a_native_interpreter_only_when_it_helps(tmp_path, monkeypatch):
+    import struct
+
+    exe = tmp_path / _arch.NATIVE_DIR / "python.exe"
+    (exe.parent / "Lib" / "site-packages" / "numpy").mkdir(parents=True)
+    head = bytearray(0x48)                                   # a minimal PE header of an arm64 executable
+    head[:2], head[0x40:0x44] = b"MZ", b"PE\0\0"
+    struct.pack_into("<I", head, 0x3C, 0x40)
+    struct.pack_into("<H", head, 0x44, 0xAA64)
+    exe.write_bytes(bytes(head))
+    monkeypatch.setattr(_arch.sys, "platform", "win32")
+    monkeypatch.setattr(_arch, "machine_arch", lambda: "arm64")
+    monkeypatch.setattr(_arch, "python_is_emulated", lambda: True)
+    monkeypatch.delenv("SWARM_NATIVE_PYTHON", raising=False)
+    assert _arch.native_python(tmp_path) == exe
+    monkeypatch.setenv("SWARM_NATIVE_PYTHON", "off")                # opted out
+    assert _arch.native_python(tmp_path) is None
+    monkeypatch.delenv("SWARM_NATIVE_PYTHON")
+    monkeypatch.setattr(_arch, "machine_arch", lambda: "x64")        # not this machine's architecture
+    assert _arch.native_python(tmp_path) is None
+    monkeypatch.setattr(_arch, "machine_arch", lambda: "arm64")
+    monkeypatch.setattr(_arch, "python_is_emulated", lambda: False)  # this interpreter is native already
+    assert _arch.native_python(tmp_path) is None
+
+
 def test_dev_doctor_runs_without_path():
     """dev.py must locate its tools even from a shell whose PATH has nothing useful on it."""
     env = {k: v for k, v in os.environ.items() if k.upper() not in ("PATH", "PYTHONPATH")}

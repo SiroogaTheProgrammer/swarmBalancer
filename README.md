@@ -6,8 +6,8 @@ The existing training, simulator, C++ kernels, stress harness and standardized s
 
 | Part | Start here |
 | --- | --- |
-| **3D studio** | `python -m swarm.studio` - tactical console: plan scenarios, pick/upload brains and tactics, watch the swarm in 3D ([docs/STUDIO.md](docs/STUDIO.md)) |
-| **Brain & tactic SDK** | `python -m swarm.sdk` - write, validate, upload and export perception brains and coordination tactics ([docs/SDK.md](docs/SDK.md)) |
+| **Drone test bench** | `python -m swarm.studio` - RECON / DEFENCE / OFFENCE tests in 3D, load your own brains, train two swarms against each other ([docs/STUDIO.md](docs/STUDIO.md), [docs/ARENA.md](docs/ARENA.md)) |
+| **Brain & tactic SDK** | `python -m swarm.sdk` - write, validate, load and export arena brains, perception brains and coordination tactics ([docs/SDK.md](docs/SDK.md)) |
 | **Testing toolkit** | Existing [dev.py](dev.py), scenarios and benchmark commands below |
 | **Device runtime** | [docs/RUNTIME.md](docs/RUNTIME.md): TLS 1.3 mutual authentication, pinned peers, bounded inference and worker failover |
 | **Select a brain / export to USB** | [setup_device.py](setup_device.py): desktop picker or CLI; [operator workflow](docs/DEPLOYMENT.md) |
@@ -30,25 +30,48 @@ Provision each Pi's identity locally and authenticate public keys out of band fi
 
 The live runtime needs only Python's standard library/TLS; cryptography is an optional dependency for provisioning and bundle operations. The overall development distribution still includes numpy for the toolkit. No claim is made of an unbreakable, independently audited or flight-certified system. Physical Pi/USB/RF and motor commissioning remain to be tested on the intended hardware.
 
-## 3D studio and SDK
+## Drone test bench and SDK
 
 ```powershell
-python -m swarm.studio                 # or: python dev.py studio  - opens the SWARM//OPS console
-python -m swarm.sdk new my_tactic --type tactic     # write your own swarm tactic (or a perception brain)
-python -m swarm.sdk validate brains/my_tactic       # conformance: physics, determinism, survives losses
+python -m swarm.studio                 # or: python dev.py studio  - opens the SWARM//OPS test bench
+python -m swarm.arena test defence --defender auction --attacker decoy      # the same tests on the command line
+python -m swarm.arena train --generations 40 --out out/arena/run1          # evolve both swarms against each other
+python -m swarm.sdk new my_wall --type policy-defender                      # write your own drone brain
 ```
 
-The studio is a local, offline console with a military operations-center look. It covers:
+The bench tests what drone swarms do, in 3-D (a 3 km field, a 600 m ceiling, a terrain mask that hides
+low flyers), on one simulator with three tests and a training mode:
 
-* **OPS**: 3D playback of every design in a scenario. You see cameras and footprints, frames, results and heartbeats moving over the shared radio, CPU load, suspicions, leader elections and failures, objects being sighted, classified and reported, and the frames the cameras actually captured.
-* **MISSION PLANNER**: edits every field of a battery `Scenario`, executes it, and saves it as a runnable preset (`scenarios/studio/`, or straight into the battery).
-* **ARMORY**: uploads, scaffolds, validates, compiles and exports brains and tactics.
-* **AFTER-ACTION**: the battery's report for a run.
-* **FIELD MANUAL**: these docs.
+* **RECON**: 12 drones survey a 3 km square. Flying higher sees more ground but in less detail. A swarm is
+  scored on surveying it in detail fast and reporting what it finds, while staying in radio contact with
+  its lead and keeping the camera / CPU / radio load low.
+* **DEFENCE**: a two-layer wall of 24 interceptors stops 48 incoming drones. A smart wall shares what it
+  sees and coordinates over its mesh radio so that interceptors do not pile onto the same attacker.
+* **OFFENCE**: the attacking swarm's side. Its drones use height, the terrain mask and their radio to find
+  a way past the wall.
+* **TRAIN**: both swarms evolve against each other (or one against a fixed opponent, or a recon swarm),
+  with live curves showing who learns faster and who is winning. Training runs on every CPU core - on an
+  8-core machine a generation of the two swarms takes about 0.7 s, a recon generation 0.4 s - with the
+  same result on any number of cores. (On Windows on ARM, `python dev.py native-python` first: the usual
+  Python there is an emulated x64 build that trains at half that speed.)
 
-Simulations run in worker processes through `run_scenario(trace=True)`. The trace only observes, so the console shows exactly the battery's numbers.
+Every run is compared, on exactly the same situations, with the built-in brains of the same role, and
+replays in 3D. Brains are hand-written tactics, Python policies you load, or small "mesh" neural
+networks every drone runs on its own observations. Trained networks compile to `.swm` for the C++ engine,
+so they run on MCU-class drones. [examples/brains/](examples/brains) ships an evolved wall, swarm and recon
+swarm. While walls could only hold their line, 2000 generations of co-evolution taught the swarm a massed
+low-level attack that got 65 % through the hand-written smart wall (the best hand-written attack: 9.5 %).
+Once walls could also choose where to wait, the trained wall moved forward within 5 generations and now
+stops 88 % of the swarm that co-evolved against it for 3000 more generations - where the smart wall stops
+48 %. The recon swarm, after 3000 generations, beats the best hand-written survey on the overall score.
 
-[docs/SDK.md](docs/SDK.md) is the library manual. A perception brain is either a compiled `.swm` network, which the C++ engine runs on every device including MCUs, or a numpy class, which runs on Linux companions. A tactic is a `SwarmNode` subclass that the simulator and battery run next to `local`/`central`/`striped`. [examples/brains/](examples/brains) has one of each. The example `load_aware_stripe` tactic wins the s11 heterogeneous yardstick: busiest CPU 3% instead of 100%.
+[docs/SDK.md](docs/SDK.md) is the library manual. Besides arena policies it covers:
+
+* **perception brains**: a compiled `.swm` network, which the C++ engine runs on every device including
+  MCUs, or a numpy class, which runs on Linux companions;
+* **tactics**: `SwarmNode` subclasses that the inference-sharing simulator and battery run next to
+  `local`/`central`/`striped`. The example `load_aware_stripe` tactic wins the s11 heterogeneous yardstick:
+  busiest CPU 3 % instead of 100 %.
 
 ## Testing toolkit
 
@@ -81,6 +104,7 @@ python dev.py test       # ctest + pytest (installs numpy/pytest into the curren
 python dev.py train      # the satellite/drone image-recognition brain -> models/tiny_cnn_{f32,int8}.swm  (~20 s)
 python dev.py bench      # the standardized scenario battery, reports in out/bench/
 python dev.py all        # all of the above in order
+python dev.py native-python   # Windows on ARM: a native interpreter for arena training (~2x faster)
 ```
 
 <details><summary>Why a script, and what it does on Windows-on-ARM</summary>
@@ -197,25 +221,25 @@ python/swarm/
   brain/             numpy layers (fwd+bwd), Sequential, .swm format, ctypes bridge to the C++ engine
   train/             synthetic overhead-imagery dataset, tiny CNN trainer
   devices/           device profiles (MHz, MACs/cycle, RAM, radio)
-  sim/               simulator core, channel, membership, brains, strategies (+ plugin registry), trace recorder, CLI
+  sim/               simulator core, channel, membership, brains, strategies (+ plugin registry), CLI
   stress/            device stress harness
   bench/             scenario presets: dataclasses, runner (twin run, survivability, checks), reports, battery CLI
-  sdk/               brain & tactic SDK: packages, Tactic/PerceptionBrain API, validation, install, device export, CLI
-  studio/            3D console: stdlib HTTP server, worker processes, scenario I/O, static WebGL UI
+  arena/             drone test bench: RECON / DEFENCE / OFFENCE simulators (vectorised), brains, evolution, CLI
+  sdk/               brain, policy & tactic SDK: packages, APIs, validation, install, device export, CLI
+  studio/            test bench UI: stdlib HTTP server, worker processes, static WebGL front end
   runtime/           stdlib device-side TLS mesh, bounded scheduler, local brain factories
   deploy/            optional crypto: identity enrollment, signed encrypted bundles, atomic USB install/launch
   robotics/          stdlib local hardware-adapter SDK, dry run, explicit arming and watchdog guard
 deploy/raspberry_pi/  node config and hardware-disabled application/service examples
 examples/robots/     dry-run motor/attachment profiles and external-driver integration examples
-examples/brains/     SDK example packages: edge_detector (python brain), micro_cnn (.swm), load_aware_stripe (tactic)
-brains/              packages uploaded in the studio or created with `python -m swarm.sdk new` (git-ignored)
+examples/brains/     SDK examples: mesh_defender / mesh_attacker / mesh_recon (trained), pincer_attack, edge_detector, micro_cnn, load_aware_stripe
+brains/              brains loaded in the studio, saved from training or created with `python -m swarm.sdk new` (git-ignored)
 scenarios/           the standardized battery (s01..s12) + _template.py; each file is runnable
-scenarios/studio/    presets saved by the studio (runnable, not part of the battery)
 tests/               pytest suite (C++ engine tests are skipped if it is not built)
 models/              trained .swm files (git-ignored; regenerate with the trainer)
 out/bench/           reports written by the battery (git-ignored)
-out/studio/          studio runs, validation cache, device exports (git-ignored)
-docs/                ARCHITECTURE.md, MODEL_FORMAT.md, SDK.md, STUDIO.md, ...
+out/studio/          test reports and training runs of the studio (git-ignored)
+docs/                ARCHITECTURE.md, ARENA.md, STUDIO.md, SDK.md, MODEL_FORMAT.md, ...
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for design details and how to extend (new layer, new device, new strategy).

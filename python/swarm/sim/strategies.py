@@ -74,7 +74,7 @@ class SwarmNode(Node):
     # "all": every member's camera runs at the scenario fps; "single": one camera (the leader's) at the
     # scenario's striped_fps, so a one-camera design is fed as many frames as N cameras.
     camera_mode = "all"
-    summary = ""  # one line for reports / the studio; built-ins are described in bench.scenario.STRATEGY_NOTES
+    summary = ""  # one line for reports and validation; built-ins are described in bench.scenario.STRATEGY_NOTES
 
     def __init__(self, profile: DeviceProfile, brain: Brain, cfg: SwarmConfig, channel: Channel, seed: int,
                  name: str | None = None, pool: FramePool | None = None):
@@ -106,8 +106,6 @@ class SwarmNode(Node):
         pass
 
     def on_killed(self) -> None:
-        if self.camera_on:
-            self.sim.trace("camera", self.id, False)
         self.camera_on = False
         self._was_leader = False
 
@@ -127,8 +125,6 @@ class SwarmNode(Node):
             self.sim.metrics.leader_changes += 1
             self.sim.event("leader", self.id)
             self.sim.log(f"node {self.id} ({self.name}) is now LEADER")
-        elif self._was_leader and not now_leader:
-            self.sim.trace("step_down", self.id)  # a better-ranked node is back in this node's view
         self._was_leader = now_leader
 
     def rebalance(self, node_id: int, alive: bool) -> None:
@@ -140,12 +136,9 @@ class SwarmNode(Node):
             return
         self.camera_on = True
         self._camera_epoch += 1
-        self.sim.trace("camera", self.id, True)
         self.sim.schedule(0.0, self._tick, self._camera_epoch)
 
     def stop_camera(self) -> None:
-        if self.camera_on:
-            self.sim.trace("camera", self.id, False)
         self.camera_on = False
 
     def _tick(self, epoch: int) -> None:
@@ -161,9 +154,7 @@ class SwarmNode(Node):
         self.sim.metrics.frames_captured += 1
         if label != 0:
             self.sim.metrics.objects_captured += 1
-        frame = Frame(id=self.sim.metrics.frames_captured, t_capture=self.sim.now, src=self.id, image=image, label=label)
-        self.sim.trace("capture", self.id, frame)
-        return frame
+        return Frame(id=self.sim.metrics.frames_captured, t_capture=self.sim.now, src=self.id, image=image, label=label)
 
     def on_capture(self, frame: Frame) -> None:
         raise NotImplementedError
@@ -174,7 +165,6 @@ class SwarmNode(Node):
         ok = self.compute(macs, cb, *args)
         if not ok:
             self.sim.metrics.frames_rejected += 1
-            self.sim.trace("reject", self.id, args[0].id if args and isinstance(args[0], Frame) else -1)
             self.sim.log(f"node {self.id} queue full - rejected work")
         return ok
 
@@ -190,7 +180,6 @@ class SwarmNode(Node):
             m.correct += 1
         if pred != 0:
             m.detections += 1
-        self.sim.trace("infer", self.id, frame.id, pred, conf, frame.label)
         then(frame, pred, conf, *args)
 
     def useful(self, pred: int, conf: float) -> bool:
@@ -207,13 +196,12 @@ class SwarmNode(Node):
                                       size=RESULT_BYTES))
 
     def leader_learns(self, frame: Frame | None, pred: int, conf: float, t_capture: float | None = None,
-                      label: int | None = None, fid: int = -1) -> None:
+                      label: int | None = None) -> None:
         """The leader now knows the result for a frame - the moment the swarm can act on it."""
         m = self.sim.metrics
         if frame is not None:
-            t_capture, label, fid = frame.t_capture, frame.label, frame.id
+            t_capture, label = frame.t_capture, frame.label
         m.learn_times.append(self.sim.now)
-        self.sim.trace("learn", self.id, fid, pred, conf, label, t_capture)
         if pred != 0:
             # latency is measured on detections only: "how long until the leader knows something is there";
             # counting every frame would favour designs whose leader inspects its own frames locally
@@ -233,8 +221,8 @@ class SwarmNode(Node):
             handler(src, msg)
 
     def on_result(self, src: int, msg: Message) -> None:
-        fid, pred, conf, t_capture, label = msg.payload
-        self.leader_learns(None, pred, conf, t_capture, label, fid=fid)
+        _fid, pred, conf, t_capture, label = msg.payload
+        self.leader_learns(None, pred, conf, t_capture, label)
 
     def on_cmd(self, src: int, msg: Message) -> None:
         pass  # followers act on the leader's decision; nothing to model yet

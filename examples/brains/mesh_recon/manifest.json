@@ -1,0 +1,12 @@
+{
+  "schema": "swarm.package/1",
+  "name": "mesh_recon",
+  "version": "3.0.0",
+  "type": "policy",
+  "format": "npz",
+  "role": "recon",
+  "model": "brain.npz",
+  "title": "Mesh recon (trained)",
+  "description": "A neural recon swarm evolved for 3000 generations in the 3-D arena (39 minutes on 8 cores). It beats the hand-written lawnmower overall: nearly the same coverage and radio contact for under half the sensing energy - cameras on only over ground it would still improve.",
+  "author": "swarmBalancer examples"
+}

@@ -3,6 +3,8 @@
 * ``perception-python`` - a plain numpy class (no ``swarm`` import, so it can ship to a drone)
 * ``perception-swm``    - ``train.py`` that defines, trains and compiles a network to ``model.swm``
 * ``tactic``            - a ``Tactic`` that starts as the built-in striped design, every decision marked
+* ``policy-defender`` / ``policy-attacker`` / ``policy-recon`` - an arena brain (``act(obs)``) for the
+  DEFENCE / OFFENCE / RECON tests, starting from a simple working rule
 """
 
 from __future__ import annotations
@@ -12,7 +14,97 @@ from pathlib import Path
 
 from .packages import NAME_RE, SCHEMA, PackageError
 
-KINDS = ("perception-python", "perception-swm", "tactic")
+KINDS = ("perception-python", "perception-swm", "tactic", "policy-defender", "policy-attacker", "policy-recon")
+
+POLICY_HEAD = '''"""__TITLE__ - __WHAT__ for the swarmBalancer arena.
+
+act(obs) is called every decision with what ALL drones of this side see and hear, for every episode at
+once: arrays are [B episodes, N drones, ...] (numpy). Return a dict of actions with the same leading
+shape. docs/ARENA.md lists every observation field. Edit, then:
+
+    python -m swarm.sdk validate <this folder>       (runs a short test and ranks it against the built-ins)
+"""
+
+import numpy as np
+
+
+class __CLASS__:
+    role = "__ROLE__"
+    title = "__TITLE__"
+'''
+
+POLICY_BODY = {
+    "defender": '''    summary = "Goes for the most urgent attacker no quicker friend has claimed; otherwise holds the line."
+    comms = True        # it relies on the claims friends radio
+    macs = 300          # compute per drone per decision, for the CPU load figure
+
+    def reset(self, batch, seed):
+        """Before each run: ``batch`` episodes. Keep per-episode memory (arrays [batch, ...]) here."""
+
+    def act(self, obs):
+        # A friend's claim (radioed at its last decision, aged to "from now") wins if it gets there sooner.
+        taken = obs.claim_eta < obs.claim_reference()
+        # Prefer attackers I reach soon and that are close to the line; stick to the one I chose. A fixed
+        # personal preference per attacker stops friends that see the same crowd all bidding for one.
+        x = np.sin(obs.index[None, :, None] * 12.9898 + obs.slot_id * 78.233) * 43758.5453
+        cost = obs.slot_eta + 0.25 * obs.slot_wall_time - 1.0 * obs.slot_mine + 10.0 * (x - np.floor(x))
+        cost = np.where(obs.slot_mask & ~taken, cost, np.inf)
+        # slot 0..KD-1 (nearest first) to go for, or -1 to hold station
+        target = np.where(np.isfinite(cost.min(-1)), cost.argmin(-1), -1)
+        # Optional: where each one waits when it holds (its guard post). obs.station is its place in the
+        # line; e.g. a third of them 1 km out as pickets, to spot a terrain-hugging attack sooner:
+        #   post = obs.station.copy()
+        #   post[..., 1] = np.where(obs.role() > 1 / 3, 1000.0, post[..., 1])
+        #   return {"target": target, "station": post}
+        return {"target": target}
+''',
+    "attacker": '''    summary = "Low and straight for the line, under the terrain mask; breaks away when an interceptor closes in."
+    comms = False
+    macs = 200
+
+    def reset(self, batch, seed):
+        """Before each run: ``batch`` episodes. Keep per-episode memory (arrays [batch, ...]) here."""
+
+    def act(self, obs):
+        # Interceptors flying at me (closing > 0.5) and closer than 120 m are a threat.
+        threat = obs.slot_mask & (obs.slot_closing > 0.5) & (obs.slot_dist < 120.0)
+        dist = np.where(threat, obs.slot_dist, np.inf)
+        k = dist.argmin(-1)[..., None, None]
+        rel = np.take_along_axis(obs.slot_rel, k, -2)[..., 0, :]   # the closest one, relative to me (x, y, z)
+        dodge = np.isfinite(dist.min(-1))
+        heading = np.where(dodge, np.where(rel[..., 0] > 0, -1.2, 1.2), 0.0)  # radians off straight-at-the-line
+        # height: cruise under the terrain mask (hard to see, a bit slower); dodge away from a threat in height
+        cruise = np.full(heading.shape, 0.6 * obs.cfg.low_altitude)
+        altitude = np.where(dodge, obs.pos[..., 2] - 60.0 * np.sign(rel[..., 2]), cruise)
+        return {"heading": heading, "speed": np.ones_like(heading), "altitude": altitude}  # speed: 0..1 of top
+''',
+    "recon": '''    summary = "Flies to the nearest unsurveyed ground at full-detail height, keeps its distance, stays in radio range."
+    comms = True
+    macs = 300
+
+    def reset(self, batch, seed):
+        """Before each run: ``batch`` episodes. Keep per-episode memory (arrays [batch, ...]) here."""
+
+    def act(self, obs):
+        cfg = obs.cfg
+        gap = obs.gap_rel                                        # [B, N, 2] nearest ground no camera has seen
+        to_gap = gap / np.maximum(np.linalg.norm(gap, axis=-1, keepdims=True), 1e-9)
+        # push away from friends closer than two camera footprints (spread the cameras out)
+        rel = obs.friend_rel[..., :2]                            # horizontal part of [B, N, M, 3]
+        d = np.linalg.norm(rel, axis=-1)
+        reach = 2 * obs.footprint[..., None]                     # footprint: ground radius my camera sees
+        w = np.where(obs.friend_mask & (d < reach), 1 - d / np.maximum(reach, 1e-9), 0.0)
+        push = -(rel / np.maximum(d, 1e-9)[..., None] * w[..., None]).sum(-2)
+        direction = to_gap + 1.2 * push
+        # out of the radio chain to the lead drone (index 0): go back towards it
+        direction = np.where(obs.linked[..., None], direction, obs.lead_rel[..., :2])
+        # height trade-off: higher sees wider but in less detail; this is the highest with full detail
+        altitude = np.full(obs.linked.shape, cfg.detail_altitude)
+        return {"direction": direction, "speed": 1.0, "camera": obs.uncovered_here > 0, "altitude": altitude}
+''',
+}
+POLICY_WHAT = {"defender": "a defender brain (interceptor wall)", "attacker": "an attacker brain (strike swarm)",
+               "recon": "a recon brain (survey swarm)"}
 
 PYTHON_BRAIN = '''"""__TITLE__ - a Python perception brain for swarmBalancer.
 
@@ -168,10 +260,10 @@ __KIND__ package for swarmBalancer, created with `python -m swarm.sdk new`.
 
 ```
 python -m swarm.sdk validate __PATH__     # conformance checks (run before uploading)
-python -m swarm.sdk pack __PATH__         # -> __NAME__.zip for the studio's ARMORY upload
+python -m swarm.sdk pack __PATH__         # -> __NAME__.zip for the studio's LOAD BRAIN button
 ```
 
-See docs/SDK.md for the interface and the rules.
+See docs/SDK.md (and docs/ARENA.md for arena policies) for the interface and the rules.
 '''
 
 
@@ -202,6 +294,12 @@ def new_package(directory: Path, name: str, kind: str, title: str = "", author: 
                         classes=["nothing", "vehicle", "building", "road", "aircraft"],
                         description="Compiled neural network; run train.py to build model.swm.")
         files["train.py"] = SWM_TRAIN
+    elif kind.startswith("policy-"):
+        role = kind.split("-", 1)[1]
+        manifest.update(type="policy", format="python", role=role, entry=f"policy.py:{cls}",
+                        description=f"Arena {role} brain (Python).")
+        files["policy.py"] = (POLICY_HEAD + POLICY_BODY[role]).replace("__ROLE__", role).replace(
+            "__WHAT__", POLICY_WHAT[role])
     else:
         manifest.update(type="tactic", entry=f"tactic.py:{cls}", strategy=name,
                         description="Coordination tactic (simulation).")

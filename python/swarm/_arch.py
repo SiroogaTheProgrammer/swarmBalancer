@@ -12,6 +12,7 @@ Standard library only - ``dev.py`` imports it before numpy is installed.
 
 from __future__ import annotations
 
+import os
 import platform
 import struct
 import sys
@@ -21,6 +22,9 @@ from pathlib import Path
 # llvm-mingw target triples per architecture (prefix of the compiler executables)
 MINGW_TRIPLES = {"arm64": "aarch64-w64-mingw32", "x64": "x86_64-w64-mingw32", "x86": "i686-w64-mingw32",
                  "arm32": "armv7-w64-mingw32"}
+# a native interpreter for the heavy simulations (arena training), set up by `python dev.py native-python`
+NATIVE_DIR = ".native-python"
+REPO = Path(__file__).resolve().parents[2]
 
 _NAMES = {"arm64": "arm64", "aarch64": "arm64", "amd64": "x64", "x86_64": "x64", "x64": "x64", "x86": "x86",
           "i386": "x86", "i686": "x86", "win32": "x86", "arm": "arm32", "armv7l": "arm32", "armv7": "arm32"}
@@ -92,3 +96,19 @@ def describe_python() -> str:
     if python_is_emulated():
         s += f" (running emulated on an {m} machine)"
     return s
+
+
+def native_python(root: Path | None = None) -> Path | None:
+    """The repo-local native interpreter (``python dev.py native-python``) when *this* one runs emulated -
+    numpy simulations run about twice as fast on it. None when this interpreter is native already, when the
+    native one is missing, of the wrong architecture or without numpy, or when SWARM_NATIVE_PYTHON=off."""
+    if os.environ.get("SWARM_NATIVE_PYTHON", "").strip().lower() in ("0", "off", "no", "false"):
+        return None
+    if sys.platform != "win32" or not python_is_emulated():
+        return None
+    exe = (root or REPO) / NATIVE_DIR / "python.exe"
+    if not exe.is_file() or dll_arch(exe) != machine_arch():
+        return None
+    if not (exe.parent / "Lib" / "site-packages" / "numpy").is_dir():
+        return None
+    return exe

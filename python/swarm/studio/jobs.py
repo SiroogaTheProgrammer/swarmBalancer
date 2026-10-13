@@ -1,8 +1,9 @@
 """Background jobs: each runs ``python -m swarm.studio.worker`` in its own process.
 
-A separate process per job keeps package code out of the server, lets a long simulation be cancelled,
-and bounds every job by a timeout. Progress arrives as protocol lines on the worker's stdout; any other
-output (a brain's prints, a training log) is kept as log text for the UI.
+A separate process per job keeps brain code out of the server, lets a long simulation be cancelled, and
+bounds every job by a timeout. Progress and structured events (training generations) arrive as protocol
+lines on the worker's stdout; any other output (a brain's prints) is kept as log text for the UI.
+``stop`` asks a training job to finish its generation and save (``cancel`` kills it).
 """
 
 from __future__ import annotations
@@ -19,10 +20,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from swarm._arch import native_python
+
 from .store import JOBS, new_id
 
-TIMEOUTS = {"run": 900.0, "validate": 300.0, "build": 1200.0, "index": 180.0}
+TIMEOUTS = {"test": 900.0, "validate": 300.0, "train": 48 * 3600.0}
 PYTHON_DIR = Path(__file__).resolve().parents[2]
+MAX_EVENTS = 5000   # events kept per job; older ones are dropped (a long run's history is on disk)
 
 
 @dataclass
@@ -33,19 +37,31 @@ class Job:
     state: str = "queued"          # queued | running | done | error | cancelled
     progress: str = ""
     log: deque = field(default_factory=lambda: deque(maxlen=400))
+    events: list = field(default_factory=list)
     created: float = field(default_factory=time.time)
     started: float | None = None
     finished: float | None = None
     result: dict | None = None
     error: str | None = None
+    meta: dict = field(default_factory=dict)
     on_done: Callable[["Job"], None] | None = None
     _proc: subprocess.Popen | None = None
     _cancel: bool = False
+    events_base: int = 0           # number of the first event still kept
 
-    def view(self, log_tail: int = 60) -> dict[str, Any]:
+    def add_event(self, event: dict) -> None:
+        self.events.append(event)
+        if len(self.events) > MAX_EVENTS:
+            drop = MAX_EVENTS // 2
+            del self.events[:drop]
+            self.events_base += drop
+
+    def view(self, since: int = 0, log_tail: int = 40) -> dict[str, Any]:
+        start = max(0, min(int(since) - self.events_base, len(self.events)))
         return {"id": self.id, "kind": self.kind, "label": self.label, "state": self.state, "progress": self.progress,
                 "log": list(self.log)[-log_tail:], "created": self.created, "started": self.started,
-                "finished": self.finished, "result": self.result, "error": self.error,
+                "finished": self.finished, "result": self.result, "error": self.error, "meta": self.meta,
+                "events": self.events[start:], "next": self.events_base + len(self.events),
                 "elapsed": (self.finished or time.time()) - (self.started or self.created)}
 
 
@@ -58,8 +74,9 @@ class JobManager:
         self._max = max_parallel
         self._closed = False
 
-    def submit(self, kind: str, spec: dict, label: str = "", on_done: Callable[[Job], None] | None = None) -> Job:
-        job = Job(new_id(), kind, label or kind, on_done=on_done)
+    def submit(self, kind: str, spec: dict, label: str = "", on_done: Callable[[Job], None] | None = None,
+               meta: dict | None = None) -> Job:
+        job = Job(new_id(), kind, label or kind, on_done=on_done, meta=dict(meta or {}))
         with self._lock:
             if self._closed:
                 raise RuntimeError("the studio is shutting down")
@@ -77,6 +94,18 @@ class JobManager:
     def active(self) -> list[Job]:
         with self._lock:
             return [j for j in self._jobs.values() if j.state in ("queued", "running")]
+
+    def stop(self, job_id: str) -> Job:
+        """Asks a running job to wrap up (training saves its brains); a queued one is simply cancelled."""
+        job = self.get(job_id)
+        if job.state == "queued":
+            return self.cancel(job_id)
+        if job.state == "running":
+            try:
+                (JOBS / job.id / "stop").touch()
+            except OSError:
+                pass
+        return job
 
     def cancel(self, job_id: str) -> Job:
         job = self.get(job_id)
@@ -127,8 +156,12 @@ class JobManager:
             env["PYTHONUNBUFFERED"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            # training is hours of numpy: on Windows on ARM it runs on the native interpreter if there is one
+            exe = (native_python() if job.kind == "train" else None) or Path(sys.executable)
+            if exe != Path(sys.executable):
+                job.log.append(f"running on the native python in {exe.parent} (about twice as fast as emulated)")
             job.state, job.started = "running", time.time()
-            job._proc = subprocess.Popen([sys.executable, "-m", "swarm.studio.worker", str(job_dir)],
+            job._proc = subprocess.Popen([str(exe), "-m", "swarm.studio.worker", str(job_dir)],
                                          cwd=PYTHON_DIR.parent, env=env, stdout=subprocess.PIPE,
                                          stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
                                          creationflags=flags)
@@ -145,9 +178,10 @@ class JobManager:
                         continue
                     if "progress" in msg:
                         job.progress = str(msg["progress"])
-                        job.log.append(job.progress)
                     if "log" in msg:
                         job.log.append(str(msg["log"]))
+                    if "event" in msg:
+                        job.add_event(msg["event"])
                 elif line:
                     job.log.append(line)
             rc = job._proc.wait()

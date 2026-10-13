@@ -1,0 +1,12 @@
+{
+  "schema": "swarm.package/1",
+  "name": "mesh_attacker",
+  "version": "4.0.0",
+  "type": "policy",
+  "format": "npz",
+  "role": "attacker",
+  "model": "brain.npz",
+  "title": "Mesh swarm (trained)",
+  "description": "A neural attacker swarm co-evolved with the mesh wall: it goes to ground out of sensor range and creeps in on one flank under the terrain mask - 37 % through a picket wall, 50 % through the hand-written smart wall.",
+  "author": "swarmBalancer examples"
+}

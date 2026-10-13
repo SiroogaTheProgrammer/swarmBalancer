@@ -71,7 +71,7 @@ class Membership:
             if pid not in self.suspected and now - t > self.timeout:
                 self.suspected.add(pid)
                 self.node.sim.metrics.failures_detected += 1
-                self.node.sim.event("suspect", pid, by=self.node.id)
+                self.node.sim.event("suspect", pid)
                 self.node.sim.log(f"node {self.node.id} suspects node {pid} (silent {now - t:.2f}s)")
                 if self.on_member_change:
                     self.on_member_change(pid, False)
@@ -85,7 +85,7 @@ class Membership:
         self.load[src] = float(msg.payload)
         if src in self.suspected:
             self.suspected.discard(src)
-            self.node.sim.event("readmit", src, by=self.node.id)
+            self.node.sim.event("readmit", src)
             self.node.sim.log(f"node {self.node.id} re-admits node {src}")
             if self.on_member_change:
                 self.on_member_change(src, True)

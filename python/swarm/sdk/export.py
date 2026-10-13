@@ -4,6 +4,7 @@
   command (the C++ engine runs it; on MCUs link ``swarm_core`` and load the same file).
 * python brain     -> a ``--brain-dir`` folder: the package as an importable module plus ``_device.py``, a
   runtime factory that feeds the brain uint8 CHW frames and answers like the native handler.
+* mesh policy      -> the arena network compiled to ``.swm`` plus its input layout and output decoding.
 * tactic           -> refused: tactics model coordination in the simulator; the runtime has its own scheduler.
 
 Nothing is signed, copied to USB or run on a device here - that stays an explicit operator step
@@ -84,9 +85,43 @@ def export_for_device(path: str | Path, out: str | Path, target: str = "linux-aa
     if pkg.type == "tactic":
         raise PackageError(f"{pkg.name} is a tactic: tactics run in the simulator only. The device runtime "
                            "(swarm.runtime) has its own bounded load balancer; port a winning policy there deliberately.")
+    if pkg.type == "policy":
+        return _export_policy(pkg, out)
     if pkg.format == "swm":
         return _export_swm(pkg, out, target)
     return _export_python(pkg, out, target)
+
+
+def _export_policy(pkg: Package, out: str | Path) -> dict:
+    if pkg.format != "npz":
+        raise PackageError(f"{pkg.name} is a Python arena policy: it runs in the simulator (and could on a Linux "
+                           "companion with your own glue). Train a mesh network for the same role to get a .swm "
+                           "that the C++ engine runs on every drone, MCUs included.")
+    from swarm.arena.brains import DECODE_NOTES, FEATURE_NAMES, OUTPUT_NAMES, ROWS
+
+    brain = pkg.make_policy()
+    out = _fresh_dir(out)
+    dest = brain.to_swm(out / f"{pkg.name}.swm")
+    rows = ROWS[brain.role]
+    inputs = "\n".join(f"  {i:>2}  {n}" for i, n in enumerate(FEATURE_NAMES[brain.role]))
+    text = f"""{pkg.label()} - arena {brain.role} brain compiled for the C++ engine
+network: {brain.n_in} inputs -> Dense {brain.hidden} -> ReLU -> Dense {brain.n_out} outputs (f32)
+cost: {brain.macs} MACs per drone per decision ({rows} network run{'s' if rows > 1 else ''})
+
+Load {dest.name} into swarm::Model (cpp/, any target) or the Python runtime's native handler and feed it,
+every decision, the float32 input vector{' of each option row' if rows > 1 else ''} below - built from the
+drone's own sensors and what it heard on the mesh radio, normalised exactly as named (docs/ARENA.md):
+{inputs}
+
+outputs: {', '.join(OUTPUT_NAMES[brain.role])}
+decode:  {DECODE_NOTES[brain.role]}
+
+The glue that builds these inputs from real sensors and turns the decoded action into autopilot set
+points is integration work per airframe; keep it bit-compatible with swarm/arena (clash.py / recon.py),
+which is the reference implementation the network was trained on.
+"""
+    (out / "DEPLOY.txt").write_text(text, encoding="utf-8")
+    return {"out": str(out), "kind": "policy", "factory": "swarm::Model", "instructions": text}
 
 
 def _export_swm(pkg: Package, out: str | Path, target: str) -> dict:

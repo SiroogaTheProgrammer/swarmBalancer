@@ -108,13 +108,6 @@ class Simulator:
         self.log_lines: list[str] = []
         self.verbose = False
         self.nodes: list["Node"] = []
-        # Timeline observer (3D studio, debugging): called as tracer(now, kind, data). It must only record -
-        # never schedule events or draw random numbers - so a traced run is identical to an untraced one.
-        self.tracer: Callable[[float, str, tuple], None] | None = None
-
-    def trace(self, kind: str, *data) -> None:
-        if self.tracer is not None:
-            self.tracer(self.now, kind, data)
 
     def schedule(self, delay: float, fn: Callable, *args) -> Event:
         ev = Event(self.now + max(0.0, delay), next(self._seq), fn, args)
@@ -131,17 +124,12 @@ class Simulator:
     def log(self, msg: str) -> None:
         line = f"[{self.now:8.3f}] {msg}"
         self.log_lines.append(line)
-        self.trace("log", msg)
         if self.verbose:
             print(line)
 
-    def event(self, kind: str, node: int, by: int | None = None) -> None:
-        """Records a membership/fault event for post-run survivability analysis.
-
-        ``by`` is the node that observed it (suspect/readmit are per-observer); it only goes to the tracer.
-        """
+    def event(self, kind: str, node: int) -> None:
+        """Records a membership/fault event for post-run survivability analysis."""
         self.metrics.events.append((kind, self.now, node))
-        self.trace("event", kind, node, by)
 
     def add_node(self, node: "Node") -> "Node":
         node.sim = self
@@ -197,10 +185,6 @@ class Node:
         m.busy_by_node[self.id] += dur
         m.energy_j += self.profile.energy_joules(macs, 0)
         self.sim.schedule(self._busy_until - self.sim.now, self._finish, self._epoch, cb, args)
-        if self.sim.tracer is not None:
-            # frames carry t_capture; the first argument of a booking is the frame it works on, if any
-            fid = args[0].id if args and hasattr(args[0], "t_capture") else -1
-            self.sim.trace("cpu", self.id, start, self._busy_until, macs, getattr(cb, "__name__", "?"), fid)
         return True
 
     def _finish(self, epoch: int, cb: Callable, args: tuple) -> None:

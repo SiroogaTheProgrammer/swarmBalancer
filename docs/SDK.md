@@ -1,35 +1,42 @@
 # Brain & Tactic SDK (`swarm.sdk`)
 
-The SDK is the library for writing code the swarm runs: code you can **upload into the 3D studio**, run in
-**the simulator and the standardized battery**, and, for perception brains, **ship to the drones**.
+The SDK is the library for writing code the swarm runs: code you can **load into the test bench**
+(`python -m swarm.studio`), run in **the simulator and the standardized battery**, and **ship to the
+drones** (compiled networks).
 
 | You write | It decides | Runs in the simulator | Runs on a drone |
 |---|---|---|---|
+| **Arena policy** (Python, or a trained mesh network `.npz`) | how each drone of a recon swarm, interceptor wall or attacking swarm moves, aims and talks - the RECON / DEFENCE / OFFENCE tests ([ARENA.md](ARENA.md)) | yes, in the arena and the test bench | mesh networks: **every device**, as `.swm` in the C++ engine; Python: Linux companions with your glue |
 | **Perception brain, `.swm` format** | what one drone concludes from one camera frame | yes (C++ engine or numpy) | **every device it fits**, MCUs included: the C++ engine executes the same `.swm` |
 | **Perception brain, Python format** | the same, in plain Python + numpy | yes | Linux companions (Pi-class) through the device runtime |
-| **Tactic** | how the swarm shares the work: who looks, who thinks, who tells whom | yes, next to `local` / `central` / `striped` | no - a tactic is a model of coordination logic; see [deploying](#getting-brains-onto-drones) |
+| **Tactic** | how the swarm shares the inference work: who looks, who thinks, who tells whom | yes, next to `local` / `central` / `striped` | no - a tactic is a model of coordination logic; see [deploying](#getting-brains-onto-drones) |
 
 Everything is a **package**: a folder (or a `.zip` of it) with `manifest.json` at its root.
 
 ## Quick start
 
 ```powershell
+python -m swarm.sdk new my_wall --type policy-defender     # -> brains/my_wall/policy.py (a working smart wall)
+python -m swarm.sdk validate brains/my_wall                # runs a DEFENCE test, ranks it against the built-ins
+python -m swarm.arena test defence --defender lib:my_wall  # or LOAD it in the studio's DEFENCE tab
+
 python -m swarm.sdk new my_eye --type perception-python    # -> brains/my_eye/ (validates out of the box)
 python -m swarm.sdk new my_net --type perception-swm       # -> brains/my_net/train.py compiles model.swm
 python -m swarm.sdk new my_plan --type tactic              # -> brains/my_plan/tactic.py (a copy of striped)
-
 python brains/my_net/train.py                              # "compile": train + export the .swm
-python -m swarm.sdk validate brains/my_plan                # conformance checks, exit 1 on failure
-python -m swarm.sdk pack brains/my_plan                    # -> my_plan.zip for the studio's ARMORY upload
-python -m swarm.studio                                     # pick it in MISSION PLANNER, EXECUTE, watch it in 3D
+python -m swarm.sdk pack brains/my_plan                    # -> my_plan.zip
 ```
 
-The same steps exist in the studio: **ARMORY -> CREATE** scaffolds a package, **COMPILE** runs a `.swm`
-package's build script, **VALIDATE** runs the checks, the upload box installs a `.zip`, `.swm` or `.py`.
-Three worked examples live in [`examples/brains/`](../examples/brains):
+In the test bench, **LOAD** (next to every brain list) installs an arena brain - a policy `.py`, trained
+`.npz` weights or a package `.zip` - checks it and selects it; the **BRAINS** drawer checks, downloads,
+shows and deletes them. Perception brains and tactics are used from the command line and the battery.
+Worked examples live in [`examples/brains/`](../examples/brains):
 
 | package | type | what it shows |
 |---|---|---|
+| `pincer_attack` | policy / python (attacker) | radio-coordinated two-flank attack under the terrain mask: breaks a zone defence (60 % through), not a wall that shares what it sees |
+| `mesh_defender`, `mesh_attacker` | policy / npz | networks evolved against each other in the 3-D arena |
+| `mesh_recon` | policy / npz (recon) | a recon swarm evolved for 3000 generations: beats the hand-written lawnmower overall - same coverage and contact, half the sensing energy |
 | `edge_detector` | perception / python | a classical-CV brain (no network): 98 % on the synthetic world, ~4 operations per pixel, deployable to Linux companions |
 | `micro_cnn` | perception / swm | a 20 KB int8 CNN for Cortex-M4 drones; `train.py` compiles it |
 | `load_aware_stripe` | tactic | a stripe that deals frames by member speed - wins the s11 heterogeneous yardstick (busiest CPU 3 % vs 100 % for round-robin) |
@@ -39,8 +46,9 @@ Three worked examples live in [`examples/brains/`](../examples/brains):
 ```
 my_brain/
   manifest.json     required - what this is and how to load it
-  brain.py          python brains: the class named in "entry"
+  brain.py          python brains: the class named in "entry"   (policies: policy.py by convention)
   model.swm         swm brains: the compiled network named in "model"
+  brain.npz         npz policies: the trained mesh weights named in "model"
   train.py          swm brains, optional: the "build" script that produces model.swm
   README.md         optional
 ```
@@ -52,20 +60,34 @@ my_brain/
 | `schema` | yes | always `"swarm.package/1"` |
 | `name` | yes | lower-case identifier, 2-40 characters (`[a-z][a-z0-9_]+`), unique in the library |
 | `version` | no | text, e.g. `"1.0.0"` |
-| `type` | yes | `"perception"` or `"tactic"` |
-| `format` | perception | `"python"` or `"swm"` |
+| `type` | yes | `"policy"`, `"perception"` or `"tactic"` |
+| `format` | policy, perception | policy: `"python"` or `"npz"`; perception: `"python"` or `"swm"` |
+| `role` | policy | `"recon"`, `"defender"` or `"attacker"` |
 | `entry` | python, tactic | `"file.py:ClassName"` - a file inside the package and the class to load |
-| `model` | swm | path of the compiled network inside the package, e.g. `"model.swm"` |
-| `build` | no (swm) | script that (re)compiles the model; the studio's COMPILE button runs it |
+| `model` | swm, npz | path of the compiled network / trained weights inside the package, e.g. `"model.swm"` |
+| `build` | no (swm) | script that (re)compiles the model |
 | `classes` | no | label names; swm files store only the class count |
-| `options` | no (python) | JSON object handed to the brain's constructor |
+| `options` | no (python) | JSON object handed to the constructor |
 | `strategy` | no (tactic) | the name scenarios use; defaults to `name` |
-| `title`, `description`, `author` | no | shown in the ARMORY |
+| `title`, `description`, `author` | no | shown in the brain lists |
 
 Paths always use `/`, stay inside the package, and are never absolute. Reading a manifest never runs code.
 
 Each package is imported under its own module namespace, so two packages may both have a `brain.py`.
 Between files of one package use **relative imports** (`from .features import edges`).
+
+## Arena policies
+
+A policy flies one side of an arena test: a class with `role` and `act(obs)`, where `obs` holds what every
+drone of that side senses and hears, for every episode at once (numpy arrays `[B, N, ...]`, positions in
+3-D), and `act` returns the actions (`{"target": ...}` for defenders, `{"heading": ..., "speed": ...}` for
+attackers, `{"direction": ..., "speed": ..., "camera": ...}` for recon; optionally `"altitude"` for
+attackers and recon drones, `"station"` - where each interceptor waits, e.g. pickets far forward - for
+defenders, and `"msg"` radio channels). Optional:
+`reset(batch, seed)`, `title`, `summary`, `macs` (compute per decision, for the CPU figure), `comms`.
+[ARENA.md](ARENA.md#writing-a-brain) lists every observation field. A trained mesh network (`.npz` from
+`python -m swarm.arena train` or the studio's TRAIN tab) is a policy too: `format: "npz"`, `model:
+"brain.npz"` - `python -m swarm.sdk install weights.npz` wraps one into a package.
 
 ## Perception brains
 
@@ -229,8 +251,6 @@ because the A72 now takes most frames itself instead of shipping them to microco
 
 ### Using a tactic in a preset
 
-The studio writes this for you; by hand:
-
 ```python
 from swarm.bench import Scenario, Swarm
 from swarm.sdk import use_package
@@ -246,8 +266,9 @@ A brain package goes into `BrainSpec(kind="package", model="examples/brains/edge
 
 ## Validation
 
-`python -m swarm.sdk validate PATH` (or VALIDATE in the ARMORY) prints a report of findings - `PASS`,
-`INFO`, `WARN`, `FAIL` - and exits 1 if anything failed. Uploads are validated automatically.
+`python -m swarm.sdk validate PATH` (or CHECK in the studio's BRAINS drawer) prints a report of findings -
+`PASS`, `INFO`, `WARN`, `FAIL` - and exits 1 if anything failed. Brains loaded in the studio are validated
+automatically.
 
 | perception brain | tactic |
 |---|---|
@@ -261,27 +282,40 @@ A brain package goes into `BrainSpec(kind="package", model="examples/brains/edge
 | device table: ms/frame, RAM fit (C++ engine, under each cap), runtime | s11 yardstick vs striped (informational) |
 | portability: `swarm` imports, third-party dependencies | |
 
-## Uploading into the studio
+An **arena policy** must load, return valid actions through a short test of its role (DEFENCE, OFFENCE or
+RECON with default settings), and give the same result twice for the same seed. It is then ranked against
+the built-in brains of its role on the same situations, and a device table shows the time per decision and
+its share of each board at the test's decision rate. Python policies are marked as needing Linux; mesh
+networks run in the C++ engine everywhere.
 
-The ARMORY's upload box (or `python -m swarm.sdk install FILE`) accepts:
+## Installing packages
+
+`python -m swarm.sdk install FILE` (and the studio's LOAD, for arena brains) accepts:
 
 * **`.zip`** - a package, with `manifest.json` at the archive root or inside one top folder
   (`python -m swarm.sdk pack` produces this);
+* **`.npz`** - trained mesh weights; they are wrapped into a policy package (role from the weights);
 * **`.swm`** - a compiled network; it is wrapped into a perception package;
-* **`.py`** - one file with a `Tactic` subclass or a class with a `classify` method; the manifest is written
-  from the file *without running it* (a tactic's `strategy = "..."` becomes its name).
+* **`.py`** - one file with an arena policy (a class with `act()` and `role = "..."`), a `Tactic` subclass
+  or a class with a `classify` method; the manifest is written from the file *without running it* (a
+  tactic's `strategy = "..."` becomes its name).
 
 Installed packages land in `brains/` (git-ignored except its README). Archives are checked before anything
 is written: no absolute paths, `..`, links or reserved device names, bounded file count, size and compression
 ratio. **Package code is trusted code**: validating and simulating it runs it on your PC with your user's
-rights (in a separate worker process, not a sandbox) - only upload code you would run as a script.
+rights (in a separate worker process, not a sandbox) - only load code you would run as a script.
 
 ## Getting brains onto drones
 
-`python -m swarm.sdk export PATH --out DIR` (or EXPORT FOR DEVICE in the ARMORY) writes the device-side
-artefacts and a `DEPLOY.txt` with the exact next commands. Nothing is signed, copied or executed - that
-stays the operator's explicit, audited flow in [DEPLOYMENT.md](DEPLOYMENT.md).
+`python -m swarm.sdk export PATH --out DIR` writes the device-side artefacts and a `DEPLOY.txt` with the
+exact next steps. Nothing is signed, copied or executed - that stays the operator's explicit, audited flow
+in [DEPLOYMENT.md](DEPLOYMENT.md).
 
+* **Mesh policy (`.npz`)** -> the network as `.swm` (Dense -> ReLU -> Dense) for the C++ engine on any
+  board, plus its input layout (every feature by name and scale) and how to decode the outputs. The glue
+  that builds those inputs from real sensors and the radio, and turns the decision into autopilot set
+  points, is per-airframe integration work; `swarm/arena` is its reference implementation.
+* **Python policy** -> refused: it runs in the simulator; train a mesh network for the same role to fly.
 * **`.swm` brain** -> the network file. On a Linux companion it runs in the C++ engine through the
   runtime's native handler (`setup_device.py prepare --model ... --library <target-built swarm_brain.so>`);
   on a microcontroller you link `swarm_core` (`cpp/`) with the board toolchain and load the same file
@@ -297,10 +331,10 @@ stays the operator's explicit, audited flow in [DEPLOYMENT.md](DEPLOYMENT.md).
 ## Command line
 
 ```
-python -m swarm.sdk new NAME --type {perception-python,perception-swm,tactic} [--dir brains] [--title T]
+python -m swarm.sdk new NAME --type {policy-defender,policy-attacker,policy-recon,perception-python,perception-swm,tactic} [--dir brains] [--title T]
 python -m swarm.sdk validate PATH [--json REPORT.json]
 python -m swarm.sdk pack PATH [-o FILE.zip]
-python -m swarm.sdk install FILE.zip|FILE.swm|FILE.py|FOLDER [--replace]
+python -m swarm.sdk install FILE.zip|FILE.npz|FILE.swm|FILE.py|FOLDER [--replace]
 python -m swarm.sdk export PATH --out NEW_DIR [--target linux-aarch64]
 python -m swarm.sdk list
 ```
@@ -312,6 +346,7 @@ from swarm.sdk import load_package, use_package, validate, discover_packages, Ta
 
 pkg = load_package("examples/brains/micro_cnn")    # reads the manifest only
 brain = pkg.make_brain(seed=0)                      # a simulator Brain (runs package code)
+policy = load_package("examples/brains/pincer_attack").make_policy()   # an arena brain
 use_package("examples/brains/load_aware_stripe")    # registers a tactic's strategy
 report = validate("brains/my_plan")                 # .ok, .status, .findings, .info, .render_text()
 ```
@@ -323,4 +358,8 @@ report = validate("brains/my_plan")                 # .ok, .status, .findings, .
 * *physics FAIL* - a frame was processed without `preprocess` (downscale) or with fewer than `brain.macs`.
 * *determinism FAIL* - randomness not from `self.rng` / the constructor seed, or iteration over a `set`.
 * *"imports swarm.*"* warning - fine for simulation; drop the import to deploy the brain.
-* *swm "not built"* - run the package's `train.py` (or COMPILE in the studio).
+* *swm "not built"* - run the package's `train.py`.
+* *"built for a different ... observation layout"* - mesh weights from an older version of the arena (for
+  example the 2-D one); train them again (the inputs a network was trained on cannot change under it).
+* *a policy's `act()` "is missing" / "has shape" / "NaN"* - the actions are checked at every decision;
+  return arrays shaped `[episodes, drones]` (scalars are broadcast) with finite values.

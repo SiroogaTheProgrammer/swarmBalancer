@@ -1,0 +1,14 @@
+{
+  "schema": "swarm.package/1",
+  "name": "pincer_attack",
+  "version": "2.0.0",
+  "type": "policy",
+  "format": "python",
+  "role": "attacker",
+  "entry": "policy.py:PincerAttack",
+  "title": "Pincer (radio-coordinated)",
+  "description": "Two flanks sneak in under the terrain mask, form up out of sensor range, agree over the mesh radio when both are ready, then hit both ends of the wall at once.",
+  "comms": true,
+  "macs": 400,
+  "author": "swarmBalancer examples"
+}

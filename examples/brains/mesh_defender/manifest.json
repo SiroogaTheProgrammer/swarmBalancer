@@ -1,0 +1,12 @@
+{
+  "schema": "swarm.package/1",
+  "name": "mesh_defender",
+  "version": "4.0.0",
+  "type": "policy",
+  "format": "npz",
+  "role": "defender",
+  "model": "brain.npz",
+  "title": "Mesh wall (trained)",
+  "description": "A neural interceptor wall co-evolved with the mesh swarm. It shares out targets like the hand-written auction and, given the choice of where to wait, moved the whole wall forward: it stops 88 % of the trained swarm, where the auction stops 48 %.",
+  "author": "swarmBalancer examples"
+}

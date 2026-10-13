@@ -38,16 +38,6 @@ def known_strategies() -> tuple[str, ...]:
     return ALL_STRATEGIES + tuple(sorted(plugin_strategies()))
 
 
-def strategy_note(name: str) -> str:
-    """One-line description of a built-in design or a registered plugin tactic."""
-    if name in STRATEGY_NOTES:
-        return STRATEGY_NOTES[name]
-    from swarm.sim.strategies import NODE_CLASSES
-
-    cls = NODE_CLASSES.get(split_strategy(name)[0])
-    return getattr(cls, "summary", "") or ""
-
-
 @dataclass(frozen=True)
 class Swarm:
     """Who is in the swarm. The leader is elected by capability, not by position in this list."""

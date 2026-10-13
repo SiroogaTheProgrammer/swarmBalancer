@@ -1,18 +1,20 @@
-"""Worker process: everything that runs package or preset code happens here, never in the server.
+"""Worker process: everything that runs brain code happens here, never in the server.
 
     python -m swarm.studio.worker <job dir>     (started by jobs.JobManager)
 
-Reads ``<job dir>/spec.json``, reports progress as JSON lines on stdout (anything else a brain or a
-training script prints is relayed as log text), and writes ``result.json`` or ``error.json``.
-Job kinds: run (simulate a scenario with tracing), validate (a package), build (run a package's
-build script, then validate), index (import every preset file).
+Reads ``<job dir>/spec.json``, reports progress and structured events as JSON lines on stdout (anything
+else a brain prints is relayed as log text) and writes ``result.json`` or ``error.json``.
+
+Job kinds:
+    test       run one arena test (with the built-in comparison) and save the report
+    train      evolve mesh brains; stops gracefully, keeping what it learned, when ``<job dir>/stop`` appears
+    validate   the SDK conformance checks of a brain package
 """
 
 from __future__ import annotations
 
 import json
-import os
-import subprocess
+import math
 import sys
 import time
 import traceback
@@ -20,120 +22,83 @@ from pathlib import Path
 
 
 def emit(**kw) -> None:
-    sys.stdout.write("\x1e" + json.dumps(kw) + "\n")  # record separator marks protocol lines
+    sys.stdout.write("\x1e" + json.dumps(_clean(kw)) + "\n")  # record separator marks protocol lines
     sys.stdout.flush()
 
 
-def _sanitize(o):
-    from swarm.bench.report import _sanitize as sanitize
-
-    return sanitize(o)
-
-
-def _profile_dict(p) -> dict:
-    return {"name": p.name, "description": p.description, "cpu_mhz": p.cpu_mhz, "macs_per_cycle": p.macs_per_cycle,
-            "ram_bytes": p.ram_bytes, "radio_bps": p.radio_bps, "radio_latency_s": p.radio_latency_s,
-            "tags": list(p.tags)}
-
-
-def do_run(spec: dict) -> dict:
-    import numpy as np
-
-    from swarm.bench.runner import run_scenario
-    from swarm.bench.scenario import strategy_note, to_plain
-    from swarm.devices import get_profile
-    from swarm.sdk import use_package
-
-    from .scenario_io import scenario_from_plain
-    from .store import prune_runs
-
-    for p in spec.get("packages") or []:
-        emit(progress=f"loading tactic package {p}")
-        use_package(p)
-    sc = scenario_from_plain(spec["scenario"])
-    res = run_scenario(sc, brain_kind=spec.get("brain_kind") or None, strategies=spec.get("strategies") or None,
-                       with_stress=bool(spec.get("with_stress", True)), trace=True, keep_frames=True,
-                       progress=lambda msg: emit(progress=msg))
-    emit(progress="writing the playback files")
-    out = Path(spec["run_dir"])
-    out.mkdir(parents=True, exist_ok=True)
-    strategies = []
-    for i, r in enumerate(res.strategies):
-        fids, images = r.trace.frame_arrays()
-        np.save(out / f"fids_{i}.npy", fids)
-        np.save(out / f"frames_{i}.npy", images)
-        strategies.append({"name": r.strategy, "note": strategy_note(r.strategy), "metrics": r.metrics,
-                           "twin_metrics": r.twin_metrics, "trace": r.trace.to_dict(),
-                           "frames": {"count": int(len(fids)), "shape": list(images.shape[1:])}})
-    run_id = out.name
-    doc = {
-        "id": run_id, "created": time.time(), "scenario": to_plain(sc), "theatre": spec.get("theatre"),
-        "packages": spec.get("packages") or [], "preset": spec.get("preset"),
-        "brain": {"kind": res.brain_kind, "description": res.brain_desc, "note": res.brain_note,
-                  "model_path": res.model_path},
-        "profiles": [_profile_dict(get_profile(n)) for n in res.resolved["profiles"]],
-        "resolved": res.resolved, "strategies": strategies, "stress": res.stress,
-        "checks": [{"strategy": c.strategy, "metric": c.check.metric, "op": c.check.op, "value": c.check.value,
-                    "ratio": c.check.ratio, "note": c.check.note, "actual": c.actual, "passed": c.passed}
-                   for c in res.checks],
-        "wall_s": res.wall_s,
-    }
-    (out / "run.json").write_text(json.dumps(_sanitize(doc), separators=(",", ":")), encoding="utf-8")
-    meta = {"id": run_id, "created": doc["created"], "name": sc.name, "description": sc.description,
-            "strategies": [s["name"] for s in strategies], "brain": res.brain_kind,
-            "nodes": len(res.resolved["profiles"]), "duration": res.resolved["duration"],
-            "faults": sc.faults.describe(), "checks_passed": sum(c.passed for c in res.checks),
-            "checks": len(res.checks), "wall_s": res.wall_s}
-    (out / "meta.json").write_text(json.dumps(_sanitize(meta)), encoding="utf-8")
-    prune_runs()
-    return {"run_id": run_id}
+def _clean(o):
+    """JSON-safe: non-finite floats become null, numpy scalars plain numbers."""
+    if isinstance(o, float):
+        return o if math.isfinite(o) else None
+    if isinstance(o, dict):
+        return {str(k): _clean(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_clean(v) for v in o]
+    if hasattr(o, "item") and callable(o.item):
+        return _clean(o.item())
+    return o
 
 
-def do_validate(spec: dict) -> dict:
-    from swarm.sdk import load_package, validate
+def do_test(spec: dict, job_dir: Path) -> dict:
+    from swarm.arena import run_test
 
-    from .store import save_validation
+    from .store import save_run
 
-    emit(progress=f"validating {spec['path']}")
-    rep = validate(spec["path"]).to_dict()
-    pkg = load_package(spec["path"])
-    save_validation(pkg.root, pkg.name, rep)
-    return {"report": rep}
-
-
-def do_build(spec: dict) -> dict:
-    from swarm.sdk import load_package
-
-    pkg = load_package(spec["path"])
-    script = pkg.manifest.get("build")
-    if not script:
-        raise ValueError(f"{pkg.name} has no build script in its manifest")
-    emit(progress=f"compiling {pkg.name}: python {script}")
-    env = dict(os.environ)
-    repo_python = str(Path(__file__).resolve().parents[2])
-    env["PYTHONPATH"] = repo_python + os.pathsep + env.get("PYTHONPATH", "")
-    env["PYTHONUNBUFFERED"] = "1"
-    proc = subprocess.Popen([sys.executable, str(pkg.root / script)], cwd=pkg.root, env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        emit(log=line.rstrip())
-    rc = proc.wait()
-    if rc != 0:
-        raise RuntimeError(f"{script} exited with code {rc}")
-    result = do_validate(spec)
-    result["built"] = True
-    return result
+    emit(progress="simulating")
+    doc = run_test(spec["test"], spec.get("settings"), spec.get("brains"), int(spec.get("episodes", 8)),
+                   int(spec.get("seed", 0)), compare=bool(spec.get("compare", True)),
+                   progress=lambda i, n: emit(progress=f"simulated {i} of {n} brain line-ups"))
+    run_id = save_run(_clean(doc))
+    return {"run": run_id, "verdict": doc["verdict"], "elapsed_s": doc["elapsed_s"]}
 
 
-def do_index(spec: dict) -> dict:
-    from .scenario_io import index_presets, preset_fingerprint
+def do_train(spec: dict, job_dir: Path) -> dict:
+    from swarm.arena.config import ClashConfig, ReconConfig, TrainConfig, from_dict
+    from swarm.arena.train import train
 
-    emit(progress="reading preset files")
-    return {"fingerprint": preset_fingerprint(), "presets": index_presets()}
+    from .store import write_json
+
+    tc = from_dict(TrainConfig, spec["train"])
+    env = from_dict(ReconConfig if tc.mode == "recon" else ClashConfig, spec.get("settings"))
+    out = Path(spec["out_dir"])
+    status = dict(spec["status"], state="running", started=time.time())
+    write_json(out / "status.json", status)
+    stop_file = job_dir / "stop"
+
+    def report(event: dict) -> None:
+        emit(event=event)
+        if event["type"] == "start":
+            status["sides"] = event.get("sides")
+            status["references"] = event.get("references")
+            status["workers"] = event.get("workers")
+            status["python"] = event.get("python")
+            write_json(out / "status.json", _clean(status))
+        elif event["type"] == "generation":
+            status["generation"] = event["gen"]
+            status["last"] = {k: event[k] for k in ("h2h", "defender_skill", "attacker_skill", "current")
+                              if k in event}
+            status["best"] = event.get("best", {})
+            write_json(out / "status.json", _clean(status))
+            emit(progress=f"generation {event['gen']} of {tc.generations}")
+
+    kw = {"recon": env} if tc.mode == "recon" else {"clash": env}
+    res = train(tc, out_dir=out, report=report, should_stop=stop_file.exists, **kw)
+    status.update(state="stopped" if res["stopped"] else "done", finished=time.time(),
+                  generation=res["generations"], brains=sorted(Path(p).stem for p in res["brains"].values()),
+                  best={role: {"gen": b["gen"], "skill": b["skill"]} for role, b in res["best"].items()})
+    write_json(out / "status.json", _clean(status))
+    return {"training": status["id"], "generations": res["generations"], "stopped": res["stopped"],
+            "seconds": res["seconds"]}
 
 
-HANDLERS = {"run": do_run, "validate": do_validate, "build": do_build, "index": do_index}
+def do_validate(spec: dict, job_dir: Path) -> dict:
+    from swarm.sdk import validate
+
+    emit(progress=f"validating {Path(spec['path']).name}")
+    return {"report": validate(spec["path"]).to_dict()}
+
+
+HANDLERS = {"test": do_test, "train": do_train, "validate": do_validate}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -141,8 +106,8 @@ def main(argv: list[str] | None = None) -> int:
     job_dir = Path(argv[0])
     spec = json.loads((job_dir / "spec.json").read_text(encoding="utf-8"))
     try:
-        result = HANDLERS[spec["kind"]](spec)
-        (job_dir / "result.json").write_text(json.dumps(_sanitize(result)), encoding="utf-8")
+        result = HANDLERS[spec["kind"]](spec, job_dir)
+        (job_dir / "result.json").write_text(json.dumps(_clean(result)), encoding="utf-8")
         return 0
     except BaseException as exc:  # noqa: BLE001 - report everything to the server
         (job_dir / "error.json").write_text(json.dumps({"error": f"{type(exc).__name__}: {exc}",

@@ -1,4 +1,4 @@
-"""Conformance checks for brain and tactic packages - the gate in front of the simulator and the drones.
+"""Conformance checks for brain, tactic and policy packages - the gate in front of the simulator and the drones.
 
     python -m swarm.sdk validate examples/brains/edge_detector
 
@@ -6,7 +6,9 @@ Perception brains: manifest, interface (shape, classes, declared cost), outputs 
 determinism, accuracy on the synthetic dataset, and a device table (time per frame, RAM fit, which
 runtime can host it). Tactics: they must run, be deterministic, pay the same physics as every built-in
 design (every processed frame costs at least brain + downscale MACs somewhere in the swarm), and keep
-delivering results after losing the leader or a worker. A report with no ``fail`` finding is usable.
+delivering results after losing the leader or a worker. Arena policies: they must load, return valid
+actions through a short test, be deterministic, and are ranked against the built-in brains of their role.
+A report with no ``fail`` finding is usable.
 """
 
 from __future__ import annotations
@@ -471,6 +473,87 @@ def _validate_tactic(pkg: Package, rep: Report) -> None:
 
 
 # ----------------------------------------------------------------------------
+# arena policies
+# ----------------------------------------------------------------------------
+POLICY_TESTS = {"recon": ("recon", {"duration": 150.0}), "defender": ("defence", {}), "attacker": ("offence", {})}
+
+
+def _policy_devices(brain, decisions_per_s: float, fmt: str) -> list[dict[str, Any]]:
+    """Per device: time per decision, the share of the CPU at the test's decision rate, and RAM."""
+    rows = []
+    ram = None
+    if fmt == "npz":
+        from swarm.arena.brains import ROWS
+
+        ram = brain.size * 4 + ROWS[brain.role] * (brain.n_in + brain.hidden + brain.n_out) * 4
+    for p in DEVICE_PROFILES.values():
+        if p.name == "host":
+            continue
+        dev_s = p.compute_seconds(brain.macs)
+        if fmt == "npz":
+            runtime, fits = "C++ engine", ram <= p.ram_bytes
+        else:
+            ok = runs_python(p)
+            runtime, fits = ("python runtime", None) if ok else ("needs Linux", False)
+        rows.append({"device": p.name, "runtime": runtime, "ms_per_frame": dev_s * 1e3,
+                     "max_fps": 1.0 / dev_s if dev_s > 0 else float("inf"), "ram_needed": ram,
+                     "ram_cap": p.ram_bytes, "fits": fits, "cpu_load": dev_s * decisions_per_s})
+    return rows
+
+
+def _validate_policy(pkg: Package, rep: Report) -> None:
+    from swarm.arena.run import run_test
+
+    role = pkg.role
+    if pkg.format == "python":
+        mods, broken = scan_imports(pkg.root)
+        if broken:
+            for b in broken:
+                rep.add("fail", "syntax", b)
+            return
+        extra = sorted(mods - {"numpy", "math", "swarm", "dataclasses", "typing", "__future__", "random",
+                               "functools", "itertools", "collections"})
+        if extra:
+            rep.add("info", "imports", f"also imports {extra}: they must exist wherever the brain runs")
+    try:
+        brain = pkg.make_policy()
+    except Exception as exc:  # noqa: BLE001 - user code
+        rep.add("fail", "load", _where(exc, pkg.root))
+        return
+    rep.add("pass", "load", f"{brain.title}: {role} brain ({brain.kind}), {brain.macs} MACs per drone per decision")
+    test, settings = POLICY_TESTS[role]
+    runs = []
+    for attempt in range(2):
+        try:
+            runs.append(run_test(test, settings, {role: brain}, episodes=4, seed=1, compare=attempt == 0))
+        except Exception as exc:  # noqa: BLE001 - user code
+            rep.add("fail", "act", _where(exc, pkg.root))
+            return
+    doc = runs[0]
+    rep.add("pass", "act", f"{doc['title']} test: {doc['verdict']['label']} - {doc['verdict']['line']}")
+    same = all(runs[0]["metrics"][k] == runs[1]["metrics"][k] for k in doc["columns"])
+    rep.add("pass" if same else "warn", "determinism",
+            "same seed, same result" if same else "two runs with the same seed differ - seed any randomness "
+                                                  "from reset(batch, seed) so tests are repeatable")
+    mine = next(r for r in doc["compare"] if r["selected"])
+    rep.add("info", "ranking", f"rank {mine['rank']} of {len(doc['compare'])} against the built-in {role} brains "
+                               "on the same situations (" + ", ".join(
+                                   f"{r['brain']['title']} {r['score']:.2f}" for r in doc["compare"]) + ")")
+    rep.info["test"] = {"test": test, "verdict": doc["verdict"], "compare": doc["compare"]}
+    cfg = doc["settings"]
+    devices = _policy_devices(brain, 1.0 / cfg["dt"], pkg.format)
+    rep.info["devices"] = devices
+    slow = [d["device"] for d in devices if d["fits"] is not False and d["cpu_load"] > 1.0]
+    if slow:
+        rep.add("warn", "compute", f"too slow to decide every {cfg['dt']} s on {slow}: it will decide less often there")
+    if pkg.format == "python":
+        rep.add("info", "deploy", "python policies run in the simulator and on Linux companions; train or "
+                                  "port it to a mesh network (.npz -> .swm) to run on MCU-class drones")
+    else:
+        rep.add("pass", "deploy", "compiles to .swm for the C++ engine (python -m swarm.arena export)")
+
+
+# ----------------------------------------------------------------------------
 # entry point
 # ----------------------------------------------------------------------------
 def validate(path: str | Path) -> Report:
@@ -483,10 +566,14 @@ def validate(path: str | Path) -> Report:
         rep.seconds = time.perf_counter() - t0
         return rep
     rep.name, rep.type, rep.format, rep.version = pkg.name, pkg.type, pkg.format, pkg.version
-    rep.add("pass", "manifest", f"{pkg.type} package {pkg.label()}" + (f" ({pkg.format})" if pkg.type == "perception" else ""))
+    rep.add("pass", "manifest", f"{pkg.type} package {pkg.label()}"
+            + (f" ({pkg.format})" if pkg.type in ("perception", "policy") else "")
+            + (f", role {pkg.role}" if pkg.type == "policy" else ""))
     try:
         if pkg.type == "perception":
             _validate_perception(pkg, rep)
+        elif pkg.type == "policy":
+            _validate_policy(pkg, rep)
         else:
             _validate_tactic(pkg, rep)
     except Exception as exc:  # noqa: BLE001 - a validator must report, not crash

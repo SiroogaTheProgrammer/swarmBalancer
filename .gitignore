@@ -5,6 +5,9 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+# native interpreter for arena training on Windows on ARM (python dev.py native-python)
+.native-python/
+.native-python.tmp/
 dist/
 
 # C++ / CMake

@@ -1,4 +1,5 @@
-"""Installing packages into the library (``brains/``) from uploads: a ``.zip``, a bare ``.swm`` or one ``.py``.
+"""Installing packages into the library (``brains/``) from uploads: a ``.zip``, a bare ``.swm``, trained
+mesh weights (``.npz``) or one ``.py``.
 
 Uploads are untrusted input until validated. Archive member names are checked before anything is written
 (no absolute paths, ``..``, drive letters, links or reserved device names; bounded count, size and
@@ -17,9 +18,9 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from .packages import MANIFEST, NAME_RE, REPO_ROOT, SCHEMA, Package, PackageError, load_package
+from .packages import LIBRARY_DIRS, MANIFEST, NAME_RE, POLICY_ROLES, SCHEMA, Package, PackageError, load_package
 
-LIBRARY = REPO_ROOT / "brains"
+LIBRARY = LIBRARY_DIRS[0]
 MAX_UPLOAD_BYTES = 128 << 20
 MAX_UNPACKED_BYTES = 256 << 20
 MAX_FILES = 400
@@ -159,22 +160,25 @@ def _class_role(node: ast.ClassDef) -> str | None:
     bases = [b.attr if isinstance(b, ast.Attribute) else getattr(b, "id", "") for b in node.bases]
     if any(b in ("Tactic", "SwarmNode") for b in bases):
         return "tactic"
-    if any(b == "PerceptionBrain" for b in bases) or any(isinstance(n, ast.FunctionDef) and n.name == "classify"
-                                                          for n in node.body):
+    methods = {n.name for n in node.body if isinstance(n, ast.FunctionDef)}
+    if "act" in methods and _literal_attr(node, "role") in POLICY_ROLES:
+        return "policy"
+    if any(b == "PerceptionBrain" for b in bases) or "classify" in methods:
         return "perception"
     return None
 
 
-def _literal_attr(node: ast.ClassDef, attr: str) -> str | None:
+def _literal_attr(node: ast.ClassDef, attr: str, kind: type = str):
     for stmt in node.body:
         if isinstance(stmt, ast.Assign) and any(getattr(t, "id", None) == attr for t in stmt.targets):
-            if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
+            if isinstance(stmt.value, ast.Constant) and type(stmt.value.value) is kind:
                 return stmt.value.value
     return None
 
 
 def install_source(data: bytes, filename: str, library: Path = LIBRARY, replace: bool = False) -> Package:
-    """One ``.py`` file with a Tactic subclass or a class with ``classify()`` becomes a package.
+    """One ``.py`` file becomes a package: a Tactic subclass, an arena policy (a class with ``act()`` and
+    ``role = "defender"`` / ``"attacker"`` / ``"recon"``) or a perception brain (a class with ``classify()``).
 
     The file is parsed, not executed, to write the manifest.
     """
@@ -188,9 +192,10 @@ def install_source(data: bytes, filename: str, library: Path = LIBRARY, replace:
     found = [(n, _class_role(n)) for n in tree.body if isinstance(n, ast.ClassDef)]
     found = [(n, role) for n, role in found if role]
     if not found:
-        raise PackageError(f"{filename}: no Tactic subclass and no class with a classify() method")
-    tactics = [n for n, role in found if role == "tactic"]
-    node, role = (tactics[0], "tactic") if tactics else found[0]
+        raise PackageError(f"{filename}: no Tactic subclass, no arena policy (a class with act() and a role) "
+                           "and no class with a classify() method")
+    preferred = [f for f in found if f[1] == "tactic"] or [f for f in found if f[1] == "policy"] or found
+    node, role = preferred[0]
     module = slug(Path(filename).stem, "module")
     name = slug(_literal_attr(node, "strategy") or module) if role == "tactic" else module
     if not NAME_RE.match(name):
@@ -200,11 +205,57 @@ def install_source(data: bytes, filename: str, library: Path = LIBRARY, replace:
                 "title": node.name, "description": doc.strip().splitlines()[0] if doc.strip() else f"Uploaded {filename}."}
     if role == "tactic":
         manifest["strategy"] = name
+    elif role == "policy":
+        manifest["role"] = _literal_attr(node, "role")
+        manifest["format"] = "python"
+        # what the brain lists show, read from the class without running it
+        manifest["title"] = _literal_attr(node, "title") or node.name
+        summary = _literal_attr(node, "summary")
+        if summary:
+            manifest["description"] = summary
+        manifest["comms"] = bool(_literal_attr(node, "comms", bool))
+        macs = _literal_attr(node, "macs", int)
+        if macs is not None and macs >= 0:
+            manifest["macs"] = macs
     else:
         manifest["format"] = "python"
     staging = _staging(library)
     try:
         (staging / f"{module}.py").write_bytes(data)
+        (staging / MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        return _place(staging, library, replace)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def install_npz(data: bytes, filename: str, library: Path = LIBRARY, replace: bool = False,
+                name: str | None = None, title: str | None = None, description: str | None = None) -> Package:
+    """Trained mesh weights (``.npz`` from ``swarm.arena`` training) become a policy package around them."""
+    from swarm.arena.brains import BrainError, NeuralBrain
+
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise PackageError(f"upload larger than {MAX_UPLOAD_BYTES >> 20} MiB")
+    if not data.startswith(b"PK"):
+        raise PackageError(f"{filename}: not an .npz file")
+    staging = _staging(library)
+    try:
+        (staging / "brain.npz").write_bytes(data)
+        try:
+            brain = NeuralBrain.load(staging / "brain.npz")
+        except BrainError as exc:
+            raise PackageError(str(exc)) from None
+        pkg_name = slug(name or Path(filename).stem, "brain")
+        if not NAME_RE.match(pkg_name):
+            raise PackageError(f"cannot derive a package name from {filename!r}")
+        trained = brain.meta.get("generations")
+        manifest = {"schema": SCHEMA, "name": pkg_name, "version": "1.0.0", "type": "policy", "format": "npz",
+                    "role": brain.role, "model": "brain.npz",
+                    "title": title or (brain.title if brain.title and not brain.title.startswith("Mesh network")
+                                       else Path(filename).stem),
+                    "description": description or (f"Mesh network trained for {trained} generations "
+                                                    f"({brain.meta.get('trained_against', 'arena')})."
+                                                    if trained else brain.summary)}
         (staging / MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         return _place(staging, library, replace)
     except BaseException:
@@ -220,7 +271,10 @@ def install_upload(data: bytes, filename: str, library: Path = LIBRARY, replace:
         return install_swm(data, filename, library, replace)
     if suffix == ".py":
         return install_source(data, filename, library, replace)
-    raise PackageError(f"{filename}: upload a package .zip, a compiled .swm network, or a single .py file")
+    if suffix == ".npz":
+        return install_npz(data, filename, library, replace)
+    raise PackageError(f"{filename}: upload a package .zip, trained mesh weights (.npz), a compiled .swm "
+                       "network, or a single .py file")
 
 
 def install_folder(src: Path, library: Path = LIBRARY, replace: bool = False) -> Package:
